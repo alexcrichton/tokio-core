@@ -111,6 +111,12 @@ impl<E> PollEvented<E> {
     /// Note that it is also only valid to call this method if `poll_read`
     /// previously indicated that the object is readable. That is, this function
     /// must always be paired with calls to `poll_read` previously.
+    ///
+    /// Also note that if the I/O object is actually readable this function may
+    /// never notify the current task, but rather it may block forever. This
+    /// method should only be invoked once a "would block" error has been seen
+    /// from the I/O object in question or it has otherwise been determined to
+    /// no longer be readable.
     pub fn need_read(&self) {
         self.readiness.fetch_and(!1, Ordering::SeqCst);
         self.token.schedule_read(&self.handle)
@@ -131,6 +137,12 @@ impl<E> PollEvented<E> {
     /// Note that it is also only valid to call this method if `poll_write`
     /// previously indicated that the object is writeable. That is, this function
     /// must always be paired with calls to `poll_write` previously.
+    ///
+    /// Also note that if the I/O object is actually writable this function may
+    /// never notify the current task, but rather it may block forever. This
+    /// method should only be invoked once a "would block" error has been seen
+    /// from the I/O object in question or it has otherwise been determined to
+    /// no longer be writable.
     pub fn need_write(&self) {
         self.readiness.fetch_and(!2, Ordering::SeqCst);
         self.token.schedule_write(&self.handle)
