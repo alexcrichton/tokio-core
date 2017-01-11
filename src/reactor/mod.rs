@@ -282,6 +282,7 @@ impl Core {
             trace!("event {:?} {:?}", event.kind(), event.token());
 
             if token == TOKEN_MESSAGES {
+                self.rx_readiness.0.set_readiness(mio::Ready::none()).unwrap();
                 CURRENT_LOOP.set(&self, || self.consume_queue());
             } else if token == TOKEN_FUTURE {
                 self.future_readiness.0.set_readiness(mio::Ready::none()).unwrap();
