@@ -16,7 +16,7 @@ use std::time::{Instant, Duration};
 
 use futures::{Future, IntoFuture, Async};
 use futures::future;
-use futures::executor::{self, Spawn, Unpark};
+use futures::executor::{self, Spawn, Notify};
 use futures::sync::mpsc;
 use futures::task::Task;
 use mio;
@@ -167,7 +167,7 @@ impl Core {
                          mio::Ready::readable(),
                          mio::PollOpt::level()));
         let rx_readiness = Arc::new(MySetReadiness(channel_pair.1));
-        rx_readiness.unpark();
+        rx_readiness.notify(0);
 
         Ok(Core {
             events: mio::Events::with_capacity(1024),
@@ -234,13 +234,13 @@ impl Core {
         where F: Future,
     {
         let mut task = executor::spawn(f);
-        let ready = self.future_readiness.clone();
+        let ready = self.future_readiness.clone().into();
         let mut future_fired = true;
 
         loop {
             if future_fired {
                 let res = try!(CURRENT_LOOP.set(self, || {
-                    task.poll_future(ready.clone())
+                    task.poll_future_notify(&ready, 0)
                 }));
                 if let Async::Ready(e) = res {
                     return Ok(e)
@@ -363,7 +363,9 @@ impl Core {
             None => return,
         };
         drop(inner);
-        let res = CURRENT_LOOP.set(self, || task.poll_future(wake));
+        let res = CURRENT_LOOP.set(self, || {
+            task.poll_future_notify(&wake.into(), 0)
+        });
         let _task_to_drop;
         inner = self.inner.borrow_mut();
         match res {
@@ -401,19 +403,19 @@ impl Core {
 
     /// Method used to notify a task handle.
     ///
-    /// Note that this should be used instead of `handle.unpark()` to ensure
+    /// Note that this should be used instead of `handle.notify()` to ensure
     /// that the `CURRENT_LOOP` variable is set appropriately.
     fn notify_handle(&self, handle: Task) {
         debug!("notifying a task handle");
-        CURRENT_LOOP.set(&self, || handle.unpark());
+        CURRENT_LOOP.set(&self, || handle.notify());
     }
 
     fn consume_queue(&self) {
         debug!("consuming notification queue");
         // TODO: can we do better than `.unwrap()` here?
-        let unpark = self.rx_readiness.clone();
+        let notify = self.rx_readiness.clone().into();
         loop {
-            let msg = self.rx.borrow_mut().poll_stream(unpark.clone()).unwrap();
+            let msg = self.rx.borrow_mut().poll_stream_notify(&notify, 0).unwrap();
             match msg {
                 Async::Ready(Some(msg)) => self.notify(msg),
                 Async::NotReady |
@@ -567,7 +569,7 @@ impl Inner {
             wake: unpark,
             _registration: pair.0,
         });
-        entry.get().wake.clone().unpark();
+        entry.get().wake.notify(0);
     }
 }
 
@@ -737,8 +739,8 @@ impl TimeoutState {
 
 struct MySetReadiness(mio::SetReadiness);
 
-impl Unpark for MySetReadiness {
-    fn unpark(&self) {
+impl Notify for MySetReadiness {
+    fn notify(&self, _id: u64) {
         self.0.set_readiness(mio::Ready::readable())
               .expect("failed to set readiness");
     }

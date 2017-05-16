@@ -29,3 +29,6 @@ futures = "0.1.11"
 [dev-dependencies]
 env_logger = { version = "0.3", default-features = false }
 libc = "0.2"
+
+[replace]
+'futures:0.1.13' = { git = 'https://github.com/carllerche/futures-rs', branch = 'restructure-task-system' }
