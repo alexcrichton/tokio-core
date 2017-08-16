@@ -4,13 +4,12 @@
 //! happening in `tokio-core`. This reactor (or event loop) is used to run
 //! futures, schedule tasks, issue I/O requests, etc.
 
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::cmp;
 use std::fmt;
 use std::io::{self, ErrorKind};
 use std::mem;
-use std::rc::Rc;
-use std::sync::{Arc, Weak as WeakArc};
+use std::sync::{Arc, Weak, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
@@ -39,7 +38,8 @@ pub use self::timeout::Timeout;
 pub use self::interval::Interval;
 
 static NEXT_LOOP_ID: AtomicUsize = ATOMIC_USIZE_INIT;
-scoped_thread_local!(static CURRENT_LOOP: Core);
+
+scoped_thread_local!(static CURRENT: *const CoreSync<'static>);
 
 /// An event loop.
 ///
@@ -49,30 +49,17 @@ scoped_thread_local!(static CURRENT_LOOP: Core);
 /// various I/O objects to interact with the event loop in interesting ways.
 // TODO: expand this
 pub struct Core {
-    events: mio::Events,
-    io: Arc<CoreIo>,
-    inner: Rc<RefCell<Inner>>,
+    inner: Arc<Inner>,
 }
 
 struct Inner {
-    io: Arc<CoreIo>,
-
-    // Timer wheel keeping track of all timeouts. The `usize` stored in the
-    // timer wheel is an index into the slab below.
-    //
-    // The slab below keeps track of the timeouts themselves as well as the
-    // state of the timeout itself. The `TimeoutToken` type is an index into the
-    // `timeouts` slab.
-    timer_heap: Heap<(Instant, usize)>,
-
-    proof_i_have_the_lock: CoreProof,
-}
-
-struct CoreIo {
     id: usize,
 
     // Actual event loop itself, aka an "epoll set"
     io: mio::Poll,
+
+    // Synchronized state used during poll
+    inner: Mutex<SynchronizedInner>,
 
     // An mpsc channel to send messages to the event loop
     tx: mpsc::UnboundedSender<Message>,
@@ -96,9 +83,28 @@ struct CoreIo {
     _rx_registration: mio::Registration,
 }
 
+struct SynchronizedInner {
+    // Timer wheel keeping track of all timeouts. The `usize` stored in the
+    // timer wheel is an index into the slab below.
+    //
+    // The slab below keeps track of the timeouts themselves as well as the
+    // state of the timeout itself. The `TimeoutToken` type is an index into the
+    // `timeouts` slab.
+    timer_heap: RefCell<Heap<(Instant, usize)>>,
+
+    events: RefCell<mio::Events>,
+
+    proof_i_have_the_lock: RefCell<CoreProof>,
+}
+
+struct CoreSync<'a> {
+    inner: &'a Arc<Inner>,
+    sync: MutexGuard<'a, SynchronizedInner>,
+}
+
 fn _assert() {
     fn _assert<T: Send + Sync>() {}
-    _assert::<CoreIo>();
+    _assert::<Core>();
 }
 
 /// An unique ID for a Core
@@ -118,7 +124,7 @@ pub struct CoreId(usize);
 #[derive(Clone)]
 pub struct Remote {
     id: usize,
-    core: WeakArc<CoreIo>,
+    core: Weak<Inner>,
 }
 
 struct ScheduledIo {
@@ -183,30 +189,28 @@ impl Core {
                          TOKEN_MESSAGES,
                          mio::Ready::readable(),
                          mio::PollOpt::level()));
-
-        let io = Arc::new(CoreIo {
-            id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
-            tx: tx,
-            rx: CoreCell::new(executor::spawn(rx)),
-            io: io,
-            io_dispatch: AtomicSlab::new(),
-            timeouts: AtomicSlab::new(),
-
-            future_readiness: future_pair.1,
-            _future_registration: future_pair.0,
-            rx_readiness: channel_pair.1,
-            _rx_registration: channel_pair.0,
-        });
-        io.rx_readiness.set_readiness(mio::Ready::readable()).unwrap();
+        channel_pair.1.set_readiness(mio::Ready::readable()).unwrap();
 
         Ok(Core {
-            events: mio::Events::with_capacity(1024),
-            io: io.clone(),
-            inner: Rc::new(RefCell::new(Inner {
-                timer_heap: Heap::new(),
+            inner: Arc::new(Inner {
+                id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
+                tx: tx,
+                rx: CoreCell::new(executor::spawn(rx)),
                 io: io,
-                proof_i_have_the_lock: unsafe { CoreProof::new() },
-            })),
+                io_dispatch: AtomicSlab::new(),
+                timeouts: AtomicSlab::new(),
+
+                future_readiness: future_pair.1,
+                _future_registration: future_pair.0,
+                rx_readiness: channel_pair.1,
+                _rx_registration: channel_pair.0,
+
+                inner: Mutex::new(SynchronizedInner {
+                    events: RefCell::new(mio::Events::with_capacity(1024)),
+                    timer_heap: RefCell::new(Heap::new()),
+                    proof_i_have_the_lock: RefCell::new(unsafe { CoreProof::new() }),
+                }),
+            }),
         })
     }
 
@@ -214,8 +218,8 @@ impl Core {
     /// tasks from other threads into this event loop.
     pub fn remote(&self) -> Remote {
         Remote {
-            id: self.io.id,
-            core: Arc::downgrade(&self.io),
+            id: self.inner.id,
+            core: Arc::downgrade(&self.inner),
         }
     }
 
@@ -237,22 +241,23 @@ impl Core {
     /// This method will **not** catch panics from polling the future `f`. If
     /// the future panics then it's the responsibility of the caller to catch
     /// that panic and handle it as appropriate.
-    pub fn run<F>(&mut self, f: F) -> Result<F::Item, F::Error>
+    pub fn run<F>(&self, f: F) -> Result<F::Item, F::Error>
         where F: Future,
     {
         let mut task = executor::spawn(f);
         let mut future_fired = true;
+        let sync = CoreSync::new(self);
 
         loop {
             if future_fired {
-                let res = try!(CURRENT_LOOP.set(self, || {
-                    task.poll_future_notify(&WeakHandle(&self.io), 0)
+                let res = try!(sync.with_tls_vars(|| {
+                    task.poll_future_notify(&WeakHandle(&self.inner), 0)
                 }));
                 if let Async::Ready(e) = res {
                     return Ok(e)
                 }
             }
-            future_fired = self.poll(None);
+            future_fired = sync.poll(None);
         }
     }
 
@@ -264,16 +269,68 @@ impl Core {
     ///
     /// `loop { lp.turn(None) }` is equivalent to calling `run` with an
     /// empty future (one that never finishes).
-    pub fn turn(&mut self, max_wait: Option<Duration>) {
-        self.poll(max_wait);
+    pub fn turn(&self, max_wait: Option<Duration>) {
+        CoreSync::new(self).poll(max_wait);
     }
 
-    fn poll(&mut self, max_wait: Option<Duration>) -> bool {
+    /// Get the ID of this loop
+    pub fn id(&self) -> CoreId {
+        CoreId(self.inner.id)
+    }
+}
+
+impl fmt::Debug for Core {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Core")
+         .field("id", &self.id())
+         .finish()
+    }
+}
+
+impl Inner {
+    fn add_source(&self, source: &Evented)
+                  -> io::Result<(Arc<AtomicUsize>, usize)> {
+        debug!("adding a new I/O source");
+        let sched = ScheduledIo {
+            readiness: Arc::new(AtomicUsize::new(0)),
+            inner: CoreCell::new(ScheduledIoInner {
+                reader: None,
+                writer: None,
+            }),
+        };
+        let ret = sched.readiness.clone();
+        let idx = self.io_dispatch.insert(sched);
+        try!(self.io.register(source,
+                              mio::Token(TOKEN_START + idx),
+                              mio::Ready::readable() |
+                                  mio::Ready::writable() |
+                                  platform::all(),
+                              mio::PollOpt::edge()));
+        Ok((ret, idx))
+    }
+
+    fn add_timeout(&self) -> usize {
+        self.timeouts.insert(ScheduledTimer {
+            heap_slot: CoreCell::new(None),
+            state: CoreCell::new(TimeoutState::NotFired),
+        })
+    }
+}
+
+impl<'a> CoreSync<'a> {
+    fn new(core: &'a Core) -> CoreSync<'a> {
+        CoreSync {
+            inner: &core.inner,
+            sync: core.inner.inner.lock().unwrap(),
+        }
+    }
+
+    fn poll(&self, max_wait: Option<Duration>) -> bool {
         // Given the `max_wait` variable specified, figure out the actual
         // timeout that we're going to pass to `poll`. This involves taking a
         // look at active timers on our heap as well.
         let start = Instant::now();
-        let timeout = self.inner.borrow_mut().timer_heap.peek().map(|t| {
+        let timeout = self.sync.timer_heap.borrow().peek().map(|t| {
             if t.0 < start {
                 Duration::new(0, 0)
             } else {
@@ -287,7 +344,8 @@ impl Core {
 
         // Block waiting for an event to happen, peeling out how many events
         // happened.
-        let amt = match self.io.io.poll(&mut self.events, timeout) {
+        let mut events = self.sync.events.borrow_mut();
+        let amt = match self.inner.io.poll(&mut events, timeout) {
             Ok(a) => a,
             Err(ref e) if e.kind() == ErrorKind::Interrupted => return false,
             Err(e) => panic!("error in poll: {}", e),
@@ -303,16 +361,16 @@ impl Core {
 
         // Process all the events that came in, dispatching appropriately
         let mut fired = false;
-        for i in 0..self.events.len() {
-            let event = self.events.get(i).unwrap();
+        for i in 0..events.len() {
+            let event = events.get(i).unwrap();
             let token = event.token();
             trace!("event {:?} {:?}", event.readiness(), event.token());
 
             if token == TOKEN_MESSAGES {
-                self.io.rx_readiness.set_readiness(mio::Ready::empty()).unwrap();
-                CURRENT_LOOP.set(&self, || self.consume_queue());
+                self.inner.rx_readiness.set_readiness(mio::Ready::empty()).unwrap();
+                self.with_tls_vars(|| self.consume_queue());
             } else if token == TOKEN_FUTURE {
-                self.io.future_readiness.set_readiness(mio::Ready::empty()).unwrap();
+                self.inner.future_readiness.set_readiness(mio::Ready::empty()).unwrap();
                 fired = true;
             } else {
                 self.dispatch(token, event.readiness());
@@ -322,22 +380,18 @@ impl Core {
         return fired
     }
 
-    fn dispatch(&mut self, token: mio::Token, ready: mio::Ready) {
+    fn dispatch(&self, token: mio::Token, ready: mio::Ready) {
         let token = usize::from(token) - TOKEN_START;
         let mut reader = None;
         let mut writer = None;
-        {
-            let mut inner = self.inner.borrow_mut();
-            let inner = &mut *inner;
-            if let Some(io) = inner.io.io_dispatch.get(token) {
-                let proof = &mut inner.proof_i_have_the_lock;
-                io.readiness.fetch_or(ready2usize(ready), Ordering::Relaxed);
-                if ready.is_writable() {
-                    writer = io.inner.get_mut(proof).writer.take();
-                }
-                if !(ready & (!mio::Ready::writable())).is_empty() {
-                    reader = io.inner.get_mut(proof).reader.take();
-                }
+        if let Some(io) = self.inner.io_dispatch.get(token) {
+            let proof = &mut *self.proof();
+            io.readiness.fetch_or(ready2usize(ready), Ordering::Relaxed);
+            if ready.is_writable() {
+                writer = io.inner.get_mut(proof).writer.take();
+            }
+            if !(ready & (!mio::Ready::writable())).is_empty() {
+                reader = io.inner.get_mut(proof).reader.take();
             }
         }
         // TODO: don't notify the same task twice
@@ -349,22 +403,20 @@ impl Core {
         }
     }
 
-    fn consume_timeouts(&mut self, now: Instant) {
+    fn consume_timeouts(&self, now: Instant) {
         loop {
             let handle = {
-                let mut inner = self.inner.borrow_mut();
-                let inner = &mut *inner;
-                let proof = &mut inner.proof_i_have_the_lock;
-                match inner.timer_heap.peek() {
+                let proof = &mut *self.proof();
+                match self.sync.timer_heap.borrow().peek() {
                     Some(head) if head.0 <= now => {}
                     Some(_) => break,
                     None => break,
                 };
-                let (_, slab_idx) = inner.timer_heap.pop().unwrap();
+                let (_, slab_idx) = self.sync.timer_heap.borrow_mut().pop().unwrap();
 
                 trace!("firing timeout: {}", slab_idx);
                 // TODO: think about whether this can panic
-                let timeout = inner.io.timeouts.get(slab_idx).expect("slab index missing");
+                let timeout = self.inner.timeouts.get(slab_idx).expect("slab index missing");
                 timeout.heap_slot.get_mut(proof).take().unwrap();
                 timeout.state.get_mut(proof).fire()
             };
@@ -380,18 +432,26 @@ impl Core {
     /// that the `CURRENT_LOOP` variable is set appropriately.
     fn notify_handle(&self, handle: Task) {
         debug!("notifying a task handle");
-        CURRENT_LOOP.set(&self, || handle.notify());
+        self.with_tls_vars(|| handle.notify())
+    }
+
+    fn with_tls_vars<F, R>(&self, f: F) -> R
+        where F: FnOnce() -> R
+    {
+        let ptr: *const CoreSync<'static> = unsafe {
+            mem::transmute(self as *const CoreSync<'a>)
+        };
+        CURRENT.set(&ptr, f)
     }
 
     fn consume_queue(&self) {
         debug!("consuming notification queue");
         loop {
             let msg = {
-                let mut inner = self.inner.borrow_mut();
-                let proof = &mut inner.proof_i_have_the_lock;
-                let rx = self.io.rx.get_mut(proof);
+                let proof = &mut *self.proof();
+                let rx = self.inner.rx.get_mut(proof);
                 // TODO: can we do better than `.unwrap()` here?
-                rx.poll_stream_notify(&WeakHandle(&self.io), 1).unwrap()
+                rx.poll_stream_notify(&WeakHandle(self.inner), 1).unwrap()
             };
             match msg {
                 Async::Ready(Some(msg)) => self.notify(msg),
@@ -403,121 +463,103 @@ impl Core {
 
     fn notify(&self, msg: Message) {
         match msg {
-            Message::DropSource(tok) => self.inner.borrow_mut().drop_source(tok),
-            Message::Schedule(tok, wake, dir) => {
-                let task = self.inner.borrow_mut().schedule(tok, wake, dir);
-                if let Some(task) = task {
-                    self.notify_handle(task);
-                }
-            }
-            Message::UpdateTimeout(t, handle) => {
-                let task = self.inner.borrow_mut().update_timeout(t, handle);
-                if let Some(task) = task {
-                    self.notify_handle(task);
-                }
-            }
-            Message::ResetTimeout(t, at) => {
-                self.inner.borrow_mut().reset_timeout(t, at);
-            }
-            Message::CancelTimeout(t) => {
-                self.inner.borrow_mut().cancel_timeout(t)
-            }
+            Message::DropSource(tok) => self.drop_source(tok),
+            Message::Schedule(tok, wake, dir) => self.schedule(tok, wake, dir),
+            Message::UpdateTimeout(t, handle) => self.update_timeout(t, handle),
+            Message::ResetTimeout(t, at) => self.reset_timeout(t, at),
+            Message::CancelTimeout(t) => self.cancel_timeout(t),
         }
     }
 
-    /// Get the ID of this loop
-    pub fn id(&self) -> CoreId {
-        CoreId(self.io.id)
-    }
-}
-
-impl fmt::Debug for Core {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Core")
-         .field("id", &self.id())
-         .finish()
-    }
-}
-
-impl Inner {
-    fn drop_source(&mut self, token: usize) {
+    fn drop_source(&self, token: usize) {
         debug!("dropping I/O source: {}", token);
         // TODO: why unsafe comment
         unsafe {
-            self.io.io_dispatch.remove(token);
+            self.inner.io_dispatch.remove(token);
         }
     }
 
-    fn schedule(&mut self, token: usize, wake: Task, dir: Direction)
-                -> Option<Task> {
+    fn schedule(&self, token: usize, wake: Task, dir: Direction) {
         debug!("scheduling direction for: {}", token);
-        let sched = self.io.io_dispatch.get(token).unwrap();
-        let proof = &mut self.proof_i_have_the_lock;
-        let slots = sched.inner.get_mut(proof);
-        let (slot, ready) = match dir {
-            Direction::Read => (&mut slots.reader, !mio::Ready::writable()),
-            Direction::Write => (&mut slots.writer, mio::Ready::writable()),
+        let sched = self.inner.io_dispatch.get(token).unwrap();
+        let task = {
+            let proof = &mut *self.proof();
+            let slots = sched.inner.get_mut(proof);
+            let (slot, ready) = match dir {
+                Direction::Read => (&mut slots.reader, !mio::Ready::writable()),
+                Direction::Write => (&mut slots.writer, mio::Ready::writable()),
+            };
+            if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
+                debug!("cancelling block");
+                *slot = None;
+                wake
+            } else {
+                debug!("blocking");
+                *slot = Some(wake);
+                return
+            }
         };
-        if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
-            debug!("cancelling block");
-            *slot = None;
-            Some(wake)
-        } else {
-            debug!("blocking");
-            *slot = Some(wake);
-            None
+        self.notify_handle(task);
+    }
+
+    fn update_timeout(&self, token: usize, handle: Task) {
+        debug!("updating a timeout: {}", token);
+        let task = {
+            let proof = &mut *self.proof();
+            // TODO: think about whether this can panic
+            let timeout = self.inner.timeouts.get(token).expect("timeout missing");
+            timeout.state.get_mut(proof).block(handle)
+        };
+        if let Some(task) = task {
+            self.notify_handle(task);
         }
     }
 
-    fn update_timeout(&mut self, token: usize, handle: Task) -> Option<Task> {
-        debug!("updating a timeout: {}", token);
+    fn reset_timeout(&self, token: usize, at: Instant) {
+        let proof = &mut *self.proof();
         // TODO: think about whether this can panic
-        let proof = &mut self.proof_i_have_the_lock;
-        let timeout = self.io.timeouts.get(token).expect("timeout missing");
-        timeout.state.get_mut(proof).block(handle)
-    }
-
-    fn reset_timeout(&mut self, token: usize, at: Instant) {
-        let proof = &mut self.proof_i_have_the_lock;
-        // TODO: think about whether this can panic
-        let state = self.io.timeouts.get(token).expect("timeout token missing");
+        let state = self.inner.timeouts.get(token).expect("timeout token missing");
 
         // TODO: avoid remove + push and instead just do one sift of the heap?
         // In theory we could update it in place and then do the percolation
         // as necessary
         if let Some(slot) = state.heap_slot.get_mut(proof).take() {
-            self.timer_heap.remove(slot);
+            self.sync.timer_heap.borrow_mut().remove(slot);
         }
-        let slot = self.timer_heap.push((at, token));
+        let slot = self.sync.timer_heap.borrow_mut().push((at, token));
         *state.heap_slot.get_mut(proof) = Some(slot);
         *state.state.get_mut(proof) = TimeoutState::NotFired;
         debug!("set a timeout: {}", token);
     }
 
-    fn cancel_timeout(&mut self, token: usize) {
+    fn cancel_timeout(&self, token: usize) {
         debug!("cancel a timeout: {}", token);
         // TODO: comment unsafe
         //
         // TODO: can we cancel a timeout twice by accident?
         unsafe {
-            let ScheduledTimer { heap_slot, state } = self.io.timeouts.remove(token);
+            let ScheduledTimer { heap_slot, state } = self.inner.timeouts.remove(token);
             drop(state);
             if let Some(slot) = heap_slot.into_inner() {
-                self.timer_heap.remove(slot);
+                self.sync.timer_heap.borrow_mut().remove(slot);
             }
         }
+    }
+
+    fn proof(&self) -> RefMut<CoreProof> {
+        self.sync.proof_i_have_the_lock.borrow_mut()
     }
 }
 
 impl Remote {
     fn send(&self, msg: Message) {
-        self.with_loop(|lp| {
-            match lp {
-                Some(lp) => {
+        self.with_loop(|opt| {
+            match opt {
+                Some(core) => {
                     // Need to execute all existing requests first, to ensure
                     // that our message is processed "in order"
-                    lp.consume_queue();
-                    lp.notify(msg);
+                    core.consume_queue();
+                    core.notify(msg);
                 }
                 None => {
                     let err = match self.core.upgrade() {
@@ -534,13 +576,14 @@ impl Remote {
     }
 
     fn with_loop<F, R>(&self, f: F) -> R
-        where F: FnOnce(Option<&Core>) -> R
+        where F: FnOnce(Option<&CoreSync>) -> R
     {
-        if CURRENT_LOOP.is_set() {
-            CURRENT_LOOP.with(|lp| {
-                let same = lp.io.id == self.id;
+        if CURRENT.is_set() {
+            CURRENT.with(|core| {
+                let core = unsafe { &**core };
+                let same = core.inner.id == self.id;
                 if same {
-                    f(Some(lp))
+                    f(Some(core))
                 } else {
                     f(None)
                 }
@@ -553,36 +596,6 @@ impl Remote {
     /// Return the ID of the represented Core
     pub fn id(&self) -> CoreId {
         CoreId(self.id)
-    }
-}
-
-impl CoreIo {
-    fn add_source(&self, source: &Evented)
-                  -> io::Result<(Arc<AtomicUsize>, usize)> {
-        debug!("adding a new I/O source");
-        let sched = ScheduledIo {
-            readiness: Arc::new(AtomicUsize::new(0)),
-            inner: CoreCell::new(ScheduledIoInner {
-                reader: None,
-                writer: None,
-            }),
-        };
-        let ret = sched.readiness.clone();
-        let idx = self.io_dispatch.insert(sched);
-        try!(self.io.register(source,
-                              mio::Token(TOKEN_START + idx),
-                              mio::Ready::readable() |
-                                 mio::Ready::writable() |
-                                 platform::all(),
-                              mio::PollOpt::edge()));
-        Ok((ret, idx))
-    }
-
-    fn add_timeout(&self) -> usize {
-        self.timeouts.insert(ScheduledTimer {
-            heap_slot: CoreCell::new(None),
-            state: CoreCell::new(TimeoutState::NotFired),
-        })
     }
 }
 
@@ -613,7 +626,7 @@ impl TimeoutState {
     }
 }
 
-impl Notify for CoreIo {
+impl Notify for Inner {
     fn notify(&self, id: usize) {
         let readiness = if id == 0 {
             &self.future_readiness
