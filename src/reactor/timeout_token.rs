@@ -24,7 +24,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub fn update_timeout(&self, handle: &Handle) {
+    pub(super) fn update_timeout(&self, handle: &Handle) {
         handle.send(Message::UpdateTimeout(self.token, task::current()))
     }
 
@@ -34,7 +34,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub fn reset_timeout(&mut self, at: Instant, handle: &Handle) {
+    pub(super) fn reset_timeout(&mut self, at: Instant, handle: &Handle) {
         handle.send(Message::ResetTimeout(self.token, at));
     }
 
@@ -44,7 +44,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub fn cancel_timeout(&self, handle: &Handle) {
+    pub(super) fn cancel_timeout(&self, handle: &Handle) {
         debug!("cancel timeout {}", self.token);
         handle.send(Message::CancelTimeout(self.token))
     }

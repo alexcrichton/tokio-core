@@ -268,12 +268,6 @@ impl<E> PollEvented<E> {
         self.token.schedule_write(&self.handle)
     }
 
-    /// Returns a reference to the event loop handle that this readiness stream
-    /// is associated with.
-    pub fn handle(&self) -> &Handle {
-        &self.handle
-    }
-
     /// Returns a shared reference to the underlying I/O object this readiness
     /// stream is wrapping.
     pub fn get_ref(&self) -> &E {

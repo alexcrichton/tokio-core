@@ -77,7 +77,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub fn schedule_read(&self, handle: &Handle) {
+    pub(super) fn schedule_read(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Read));
     }
 
@@ -104,7 +104,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub fn schedule_write(&self, handle: &Handle) {
+    pub(super) fn schedule_write(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Write));
     }
 
@@ -130,7 +130,7 @@ impl IoToken {
     /// This function will panic if the event loop this handle is associated
     /// with has gone away, or if there is an error communicating with the event
     /// loop.
-    pub fn drop_source(&self, handle: &Handle) {
+    pub(super) fn drop_source(&self, handle: &Handle) {
         handle.send(Message::DropSource(self.token));
     }
 }

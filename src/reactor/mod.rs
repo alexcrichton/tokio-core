@@ -123,7 +123,7 @@ pub struct CoreId(usize);
 /// Handles can be cloned, and when cloned they will still refer to the
 /// same underlying event loop.
 #[derive(Clone)]
-pub struct Handle {
+struct Handle {
     id: usize,
     core: Weak<Inner>,
 }
@@ -132,10 +132,6 @@ struct ScheduledIo {
     readiness: Arc<AtomicUsize>,
     inner: CoreCell<ScheduledIoInner>,
 }
-
-// TODO: comment this
-unsafe impl Send for ScheduledIo {}
-unsafe impl Sync for ScheduledIo {}
 
 struct ScheduledIoInner {
     reader: Option<Task>,
@@ -146,10 +142,6 @@ struct ScheduledTimer {
     heap_slot: CoreCell<Option<Slot>>,
     state: CoreCell<TimeoutState>,
 }
-
-// TODO: comment this
-unsafe impl Send for ScheduledTimer {}
-unsafe impl Sync for ScheduledTimer {}
 
 enum TimeoutState {
     NotFired,
@@ -217,7 +209,7 @@ impl Core {
 
     /// Generates a remote handle to this event loop which can be used to spawn
     /// tasks from other threads into this event loop.
-    pub fn handle(&self) -> Handle {
+    fn handle(&self) -> Handle {
         Handle {
             id: self.inner.id,
             core: Arc::downgrade(&self.inner),
