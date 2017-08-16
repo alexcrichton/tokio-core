@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use futures::{Poll, Async};
 use futures::stream::{Stream};
 
-use reactor::Handle;
+use reactor::{Handle, Core};
 use reactor::timeout_token::TimeoutToken;
 
 /// A stream representing notifications at fixed interval
@@ -35,8 +35,8 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// interval object. The interval object itself is then a stream which will
     /// be set to fire at the specified intervals
-    pub fn new(dur: Duration, handle: &Handle) -> io::Result<Interval> {
-        Interval::new_at(Instant::now() + dur, dur, handle)
+    pub fn new(dur: Duration, core: &Core) -> Interval {
+        Interval::new_at(Instant::now() + dur, dur, core)
     }
 
     /// Creates a new interval which will fire at the time specified by `at`,
@@ -45,15 +45,13 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, dur: Duration, handle: &Handle)
-        -> io::Result<Interval>
-    {
-        Ok(Interval {
-            token: try!(TimeoutToken::new(at, handle)),
+    pub fn new_at(at: Instant, dur: Duration, core: &Core) -> Interval {
+        Interval {
+            token: TimeoutToken::new(at, core),
             next: at,
             interval: dur,
-            handle: handle.clone(),
-        })
+            handle: core.handle(),
+        }
     }
 }
 

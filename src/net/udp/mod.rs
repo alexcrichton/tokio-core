@@ -6,7 +6,7 @@ use std::fmt;
 use futures::{Async, Future, Poll};
 use mio;
 
-use reactor::{Handle, PollEvented};
+use reactor::{Core, PollEvented};
 
 /// An I/O object representing a UDP socket.
 pub struct UdpSocket {
@@ -21,13 +21,13 @@ impl UdpSocket {
     ///
     /// This function will create a new UDP socket and attempt to bind it to the
     /// `addr` provided. If the result is `Ok`, the socket has successfully bound.
-    pub fn bind(addr: &SocketAddr, handle: &Handle) -> io::Result<UdpSocket> {
+    pub fn bind(addr: &SocketAddr, core: &Core) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::bind(addr));
-        UdpSocket::new(udp, handle)
+        UdpSocket::new(udp, core)
     }
 
-    fn new(socket: mio::net::UdpSocket, handle: &Handle) -> io::Result<UdpSocket> {
-        let io = try!(PollEvented::new(socket, handle));
+    fn new(socket: mio::net::UdpSocket, core: &Core) -> io::Result<UdpSocket> {
+        let io = try!(PollEvented::new(socket, core));
         Ok(UdpSocket { io: io })
     }
 
@@ -41,9 +41,9 @@ impl UdpSocket {
     /// configure a socket before it's handed off, such as setting options like
     /// `reuse_address` or binding to multiple addresses.
     pub fn from_socket(socket: net::UdpSocket,
-                       handle: &Handle) -> io::Result<UdpSocket> {
+                       core: &Core) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::from_socket(socket));
-        UdpSocket::new(udp, handle)
+        UdpSocket::new(udp, core)
     }
 
     /// Provides a `Stream` and `Sink` interface for reading and writing to this

@@ -5,7 +5,7 @@ use std::io;
 use futures::task;
 use mio::event::Evented;
 
-use reactor::{Message, Handle, Direction};
+use reactor::{Core, Message, Handle, Direction};
 
 /// A token that identifies an active timeout.
 pub struct IoToken {
@@ -31,14 +31,9 @@ impl IoToken {
     /// The returned future will panic if the event loop this handle is
     /// associated with has gone away, or if there is an error communicating
     /// with the event loop.
-    pub fn new(source: &Evented, handle: &Handle) -> io::Result<IoToken> {
-        match handle.core.upgrade() {
-            Some(inner) => {
-                let (ready, token) = try!(inner.add_source(source));
-                Ok(IoToken { token: token, readiness: ready })
-            }
-            None => Err(io::Error::new(io::ErrorKind::Other, "event loop gone")),
-        }
+    pub fn new(source: &Evented, core: &Core) -> io::Result<IoToken> {
+        let (ready, token) = try!(core.inner.add_source(source));
+        Ok(IoToken { token: token, readiness: ready })
     }
 
 	/// Consumes the last readiness notification the token this source is for

@@ -105,6 +105,7 @@ struct CoreSync<'a> {
 fn _assert() {
     fn _assert<T: Send + Sync>() {}
     _assert::<Core>();
+    _assert::<Handle>();
 }
 
 /// An unique ID for a Core
@@ -276,6 +277,14 @@ impl Core {
     /// Get the ID of this loop
     pub fn id(&self) -> CoreId {
         CoreId(self.inner.id)
+    }
+
+    fn send(&self, msg: Message) {
+        // Need to execute all existing requests first, to ensure
+        // that our message is processed "in order"
+        let sync = CoreSync::new(self);
+        sync.consume_queue();
+        sync.notify(msg);
     }
 }
 

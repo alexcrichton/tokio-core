@@ -1,9 +1,8 @@
-use std::io;
 use std::time::Instant;
 
 use futures::task;
 
-use reactor::{Message, Handle};
+use reactor::{Message, Core, Handle};
 
 /// A token that identifies an active timeout.
 pub struct TimeoutToken {
@@ -13,15 +12,10 @@ pub struct TimeoutToken {
 impl TimeoutToken {
     /// Adds a new timeout to get fired at the specified instant, notifying the
     /// specified task.
-    pub fn new(at: Instant, handle: &Handle) -> io::Result<TimeoutToken> {
-        match handle.core.upgrade() {
-            Some(inner) => {
-                let token = inner.add_timeout();
-                handle.send(Message::ResetTimeout(token, at));
-                Ok(TimeoutToken { token: token })
-            }
-            None => Err(io::Error::new(io::ErrorKind::Other, "event loop gone")),
-        }
+    pub fn new(at: Instant, core: &Core) -> TimeoutToken {
+        let token = core.inner.add_timeout();
+        core.send(Message::ResetTimeout(token, at));
+        TimeoutToken { token: token }
     }
 
     /// Updates a previously added timeout to notify a new task instead.
