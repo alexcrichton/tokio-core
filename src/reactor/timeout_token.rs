@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use futures::task;
 
-use reactor::{Message, Handle, Remote};
+use reactor::{Message, Remote};
 
 /// A token that identifies an active timeout.
 pub struct TimeoutToken {
@@ -13,8 +13,7 @@ pub struct TimeoutToken {
 impl TimeoutToken {
     /// Adds a new timeout to get fired at the specified instant, notifying the
     /// specified task.
-    pub fn new(at: Instant, handle: &Handle) -> io::Result<TimeoutToken> {
-        let remote = handle.remote();
+    pub fn new(at: Instant, remote: &Remote) -> io::Result<TimeoutToken> {
         match remote.core.upgrade() {
             Some(inner) => {
                 let token = inner.add_timeout();

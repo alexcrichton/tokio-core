@@ -6,7 +6,7 @@ use std::fmt;
 use futures::{Async, Future, Poll};
 use mio;
 
-use reactor::{Handle, PollEvented};
+use reactor::{Remote, PollEvented};
 
 /// An I/O object representing a UDP socket.
 pub struct UdpSocket {
@@ -21,19 +21,19 @@ impl UdpSocket {
     ///
     /// This function will create a new UDP socket and attempt to bind it to the
     /// `addr` provided. If the result is `Ok`, the socket has successfully bound.
-    pub fn bind(addr: &SocketAddr, handle: &Handle) -> io::Result<UdpSocket> {
+    pub fn bind(addr: &SocketAddr, remote: &Remote) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::bind(addr));
-        UdpSocket::new(udp, handle)
+        UdpSocket::new(udp, remote)
     }
 
-    fn new(socket: mio::net::UdpSocket, handle: &Handle) -> io::Result<UdpSocket> {
-        let io = try!(PollEvented::new(socket, handle));
+    fn new(socket: mio::net::UdpSocket, remote: &Remote) -> io::Result<UdpSocket> {
+        let io = try!(PollEvented::new(socket, remote));
         Ok(UdpSocket { io: io })
     }
 
     /// Creates a new `UdpSocket` from the previously bound socket provided.
     ///
-    /// The socket given will be registered with the event loop that `handle` is
+    /// The socket given will be registered with the event loop that `remote` is
     /// associated with. This function requires that `socket` has previously
     /// been bound to an address to work correctly.
     ///
@@ -41,9 +41,9 @@ impl UdpSocket {
     /// configure a socket before it's handed off, such as setting options like
     /// `reuse_address` or binding to multiple addresses.
     pub fn from_socket(socket: net::UdpSocket,
-                       handle: &Handle) -> io::Result<UdpSocket> {
+                       remote: &Remote) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::from_socket(socket));
-        UdpSocket::new(udp, handle)
+        UdpSocket::new(udp, remote)
     }
 
     /// Provides a `Stream` and `Sink` interface for reading and writing to this

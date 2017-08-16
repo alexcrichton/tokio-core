@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::{Future, Poll, Async};
 
-use reactor::{Remote, Handle};
+use reactor::Remote;
 use reactor::timeout_token::TimeoutToken;
 
 /// A future representing the notification that a timeout has occurred.
@@ -30,8 +30,8 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new(dur: Duration, handle: &Handle) -> io::Result<Timeout> {
-        Timeout::new_at(Instant::now() + dur, handle)
+    pub fn new(dur: Duration, remote: &Remote) -> io::Result<Timeout> {
+        Timeout::new_at(Instant::now() + dur, remote)
     }
 
     /// Creates a new timeout which will fire at the time specified by `at`.
@@ -39,11 +39,11 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, handle: &Handle) -> io::Result<Timeout> {
+    pub fn new_at(at: Instant, remote: &Remote) -> io::Result<Timeout> {
         Ok(Timeout {
-            token: try!(TimeoutToken::new(at, &handle)),
+            token: try!(TimeoutToken::new(at, remote)),
             when: at,
-            handle: handle.remote().clone(),
+            handle: remote.clone(),
         })
     }
 

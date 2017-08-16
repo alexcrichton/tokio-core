@@ -9,19 +9,17 @@ use std::cmp;
 use std::fmt;
 use std::io::{self, ErrorKind};
 use std::mem;
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::sync::{Arc, Weak as WeakArc};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
-use futures::{Future, IntoFuture, Async};
-use futures::future::{self, Executor, ExecuteError};
+use futures::{Future, Async};
 use futures::executor::{self, Spawn, Notify};
 use futures::sync::mpsc;
 use futures::task::Task;
 use mio;
 use mio::event::Evented;
-use slab::Slab;
 
 use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
@@ -58,9 +56,6 @@ pub struct Core {
 
 struct Inner {
     io: Arc<CoreIo>,
-
-    // Dispatch slabs for I/O and futures events
-    task_dispatch: Slab<ScheduledTask>,
 
     // Timer wheel keeping track of all timeouts. The `usize` stored in the
     // timer wheel is an index into the slab below.
@@ -126,14 +121,6 @@ pub struct Remote {
     core: WeakArc<CoreIo>,
 }
 
-/// A non-sendable handle to an event loop, useful for manufacturing instances
-/// of `LoopData`.
-#[derive(Clone)]
-pub struct Handle {
-    remote: Remote,
-    inner: Weak<RefCell<Inner>>,
-}
-
 struct ScheduledIo {
     readiness: Arc<AtomicUsize>,
     inner: CoreCell<ScheduledIoInner>,
@@ -157,12 +144,6 @@ struct ScheduledTimer {
 unsafe impl Send for ScheduledTimer {}
 unsafe impl Sync for ScheduledTimer {}
 
-struct ScheduledTask {
-    _registration: mio::Registration,
-    spawn: Option<Spawn<Box<Future<Item=(), Error=()>>>>,
-    wake: Option<Arc<MySetReadiness>>,
-}
-
 enum TimeoutState {
     NotFired,
     Fired,
@@ -180,7 +161,6 @@ enum Message {
     UpdateTimeout(usize, Task),
     ResetTimeout(usize, Instant),
     CancelTimeout(usize),
-    Run(Box<FnBox>),
 }
 
 const TOKEN_MESSAGES: mio::Token = mio::Token(0);
@@ -223,25 +203,11 @@ impl Core {
             events: mio::Events::with_capacity(1024),
             io: io.clone(),
             inner: Rc::new(RefCell::new(Inner {
-                task_dispatch: Slab::with_capacity(1),
                 timer_heap: Heap::new(),
                 io: io,
                 proof_i_have_the_lock: unsafe { CoreProof::new() },
             })),
         })
-    }
-
-    /// Returns a handle to this event loop which cannot be sent across threads
-    /// but can be used as a proxy to the event loop itself.
-    ///
-    /// Handles are cloneable and clones always refer to the same event loop.
-    /// This handle is typically passed into functions that create I/O objects
-    /// to bind them to this event loop.
-    pub fn handle(&self) -> Handle {
-        Handle {
-            remote: self.remote(),
-            inner: Rc::downgrade(&self.inner),
-        }
     }
 
     /// Generates a remote handle to this event loop which can be used to spawn
@@ -358,18 +324,10 @@ impl Core {
 
     fn dispatch(&mut self, token: mio::Token, ready: mio::Ready) {
         let token = usize::from(token) - TOKEN_START;
-        if token % 2 == 0 {
-            self.dispatch_io(token / 2, ready)
-        } else {
-            self.dispatch_task(token / 2)
-        }
-    }
-
-    fn dispatch_io(&mut self, token: usize, ready: mio::Ready) {
         let mut reader = None;
         let mut writer = None;
-        let mut inner = self.inner.borrow_mut();
         {
+            let mut inner = self.inner.borrow_mut();
             let inner = &mut *inner;
             if let Some(io) = inner.io.io_dispatch.get(token) {
                 let proof = &mut inner.proof_i_have_the_lock;
@@ -382,7 +340,6 @@ impl Core {
                 }
             }
         }
-        drop(inner);
         // TODO: don't notify the same task twice
         if let Some(reader) = reader {
             self.notify_handle(reader);
@@ -392,41 +349,10 @@ impl Core {
         }
     }
 
-    fn dispatch_task(&mut self, token: usize) {
-        let mut inner = self.inner.borrow_mut();
-        let (task, wake) = match inner.task_dispatch.get_mut(token) {
-            Some(slot) => (slot.spawn.take(), slot.wake.take()),
-            None => return,
-        };
-        let (mut task, wake) = match (task, wake) {
-            (Some(task), Some(wake)) => (task, wake),
-            _ => return,
-        };
-        wake.0.set_readiness(mio::Ready::empty()).unwrap();
-        drop(inner);
-        let res = CURRENT_LOOP.set(self, || {
-            task.poll_future_notify(&wake, 0)
-        });
-        let _task_to_drop;
-        inner = self.inner.borrow_mut();
-        match res {
-            Ok(Async::NotReady) => {
-                assert!(inner.task_dispatch[token].spawn.is_none());
-                inner.task_dispatch[token].spawn = Some(task);
-                inner.task_dispatch[token].wake = Some(wake);
-            }
-            Ok(Async::Ready(())) |
-            Err(()) => {
-                _task_to_drop = inner.task_dispatch.remove(token).unwrap();
-            }
-        }
-        drop(inner);
-    }
-
     fn consume_timeouts(&mut self, now: Instant) {
         loop {
-            let mut inner = self.inner.borrow_mut();
             let handle = {
+                let mut inner = self.inner.borrow_mut();
                 let inner = &mut *inner;
                 let proof = &mut inner.proof_i_have_the_lock;
                 match inner.timer_heap.peek() {
@@ -442,7 +368,6 @@ impl Core {
                 timeout.heap_slot.get_mut(proof).take().unwrap();
                 timeout.state.get_mut(proof).fire()
             };
-            drop(inner);
             if let Some(handle) = handle {
                 self.notify_handle(handle);
             }
@@ -497,21 +422,12 @@ impl Core {
             Message::CancelTimeout(t) => {
                 self.inner.borrow_mut().cancel_timeout(t)
             }
-            Message::Run(r) => r.call_box(self),
         }
     }
 
     /// Get the ID of this loop
     pub fn id(&self) -> CoreId {
         CoreId(self.io.id)
-    }
-}
-
-impl<F> Executor<F> for Core
-    where F: Future<Item = (), Error = ()> + 'static,
-{
-    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
-        self.handle().execute(future)
     }
 }
 
@@ -591,28 +507,6 @@ impl Inner {
             }
         }
     }
-
-    fn spawn(&mut self, future: Box<Future<Item=(), Error=()>>) {
-        if self.task_dispatch.vacant_entry().is_none() {
-            let len = self.task_dispatch.len();
-            self.task_dispatch.reserve_exact(len);
-        }
-        let entry = self.task_dispatch.vacant_entry().unwrap();
-        let token = TOKEN_START + 2 * entry.index() + 1;
-        let pair = mio::Registration::new2();
-        self.io.io.register(&pair.0,
-                            mio::Token(token),
-                            mio::Ready::readable(),
-                            mio::PollOpt::level())
-            .expect("cannot fail future registration with mio");
-        let unpark = Arc::new(MySetReadiness(pair.1));
-        unpark.notify(0);
-        entry.insert(ScheduledTask {
-            spawn: Some(executor::spawn(future)),
-            wake: Some(unpark),
-            _registration: pair.0,
-        });
-    }
 }
 
 impl Remote {
@@ -656,61 +550,9 @@ impl Remote {
         }
     }
 
-    /// Spawns a new future into the event loop this remote is associated with.
-    ///
-    /// This function takes a closure which is executed within the context of
-    /// the I/O loop itself. The future returned by the closure will be
-    /// scheduled on the event loop and run to completion.
-    ///
-    /// Note that while the closure, `F`, requires the `Send` bound as it might
-    /// cross threads, the future `R` does not.
-    ///
-    /// # Panics
-    ///
-    /// This method will **not** catch panics from polling the future `f`. If
-    /// the future panics then it's the responsibility of the caller to catch
-    /// that panic and handle it as appropriate.
-    pub fn spawn<F, R>(&self, f: F)
-        where F: FnOnce(&Handle) -> R + Send + 'static,
-              R: IntoFuture<Item=(), Error=()>,
-              R::Future: 'static,
-    {
-        self.send(Message::Run(Box::new(|lp: &Core| {
-            let f = f(&lp.handle());
-            lp.inner.borrow_mut().spawn(Box::new(f.into_future()));
-        })));
-    }
-
     /// Return the ID of the represented Core
     pub fn id(&self) -> CoreId {
         CoreId(self.id)
-    }
-
-    /// Attempts to "promote" this remote to a handle, if possible.
-    ///
-    /// This function is intended for structures which typically work through a
-    /// `Remote` but want to optimize runtime when the remote doesn't actually
-    /// leave the thread of the original reactor. This will attempt to return a
-    /// handle if the `Remote` is on the same thread as the event loop and the
-    /// event loop is running.
-    ///
-    /// If this `Remote` has moved to a different thread or if the event loop is
-    /// running, then `None` may be returned. If you need to guarantee access to
-    /// a `Handle`, then you can call this function and fall back to using
-    /// `spawn` above if it returns `None`.
-    pub fn handle(&self) -> Option<Handle> {
-        if CURRENT_LOOP.is_set() {
-            CURRENT_LOOP.with(|lp| {
-                let same = lp.io.id == self.id;
-                if same {
-                    Some(lp.handle())
-                } else {
-                    None
-                }
-            })
-        } else {
-            None
-        }
     }
 }
 
@@ -728,7 +570,7 @@ impl CoreIo {
         let ret = sched.readiness.clone();
         let idx = self.io_dispatch.insert(sched);
         try!(self.io.register(source,
-                              mio::Token(TOKEN_START + idx * 2),
+                              mio::Token(TOKEN_START + idx),
                               mio::Ready::readable() |
                                  mio::Ready::writable() |
                                  platform::all(),
@@ -744,83 +586,9 @@ impl CoreIo {
     }
 }
 
-impl<F> Executor<F> for Remote
-    where F: Future<Item = (), Error = ()> + Send + 'static,
-{
-    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
-        self.spawn(|_| future);
-        Ok(())
-    }
-}
-
 impl fmt::Debug for Remote {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Remote")
-         .field("id", &self.id())
-         .finish()
-    }
-}
-
-impl Handle {
-    /// Returns a reference to the underlying remote handle to the event loop.
-    pub fn remote(&self) -> &Remote {
-        &self.remote
-    }
-
-    /// Spawns a new future on the event loop this handle is associated with.
-    ///
-    /// # Panics
-    ///
-    /// This method will **not** catch panics from polling the future `f`. If
-    /// the future panics then it's the responsibility of the caller to catch
-    /// that panic and handle it as appropriate.
-    pub fn spawn<F>(&self, f: F)
-        where F: Future<Item=(), Error=()> + 'static,
-    {
-        let inner = match self.inner.upgrade() {
-            Some(inner) => inner,
-            None => return,
-        };
-        inner.borrow_mut().spawn(Box::new(f));
-    }
-
-    /// Spawns a closure on this event loop.
-    ///
-    /// This function is a convenience wrapper around the `spawn` function above
-    /// for running a closure wrapped in `futures::lazy`. It will spawn the
-    /// function `f` provided onto the event loop, and continue to run the
-    /// future returned by `f` on the event loop as well.
-    ///
-    /// # Panics
-    ///
-    /// This method will **not** catch panics from polling the future `f`. If
-    /// the future panics then it's the responsibility of the caller to catch
-    /// that panic and handle it as appropriate.
-    pub fn spawn_fn<F, R>(&self, f: F)
-        where F: FnOnce() -> R + 'static,
-              R: IntoFuture<Item=(), Error=()> + 'static,
-    {
-        self.spawn(future::lazy(f))
-    }
-
-    /// Return the ID of the represented Core
-    pub fn id(&self) -> CoreId {
-        self.remote.id()
-    }
-}
-
-impl<F> Executor<F> for Handle
-    where F: Future<Item = (), Error = ()> + 'static,
-{
-    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
-        self.spawn(future);
-        Ok(())
-    }
-}
-
-impl fmt::Debug for Handle {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Handle")
          .field("id", &self.id())
          .finish()
     }
@@ -842,15 +610,6 @@ impl TimeoutState {
             TimeoutState::Fired => panic!("fired twice?"),
             TimeoutState::Waiting(handle) => Some(handle),
         }
-    }
-}
-
-struct MySetReadiness(mio::SetReadiness);
-
-impl Notify for MySetReadiness {
-    fn notify(&self, _id: usize) {
-        self.0.set_readiness(mio::Ready::readable())
-              .expect("failed to set readiness");
     }
 }
 

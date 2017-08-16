@@ -15,7 +15,7 @@ use mio::event::Evented;
 use mio::Ready;
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use reactor::{Handle, Remote};
+use reactor::Remote;
 use reactor::io_token::IoToken;
 
 /// A concrete implementation of a stream of readiness notifications for I/O
@@ -84,10 +84,10 @@ impl<E: Evented> PollEvented<E> {
     ///
     /// This method returns a future which will resolve to the readiness stream
     /// when it's ready.
-    pub fn new(io: E, handle: &Handle) -> io::Result<PollEvented<E>> {
+    pub fn new(io: E, remote: &Remote) -> io::Result<PollEvented<E>> {
         Ok(PollEvented {
-            token: try!(IoToken::new(&io, handle)),
-            handle: handle.remote().clone(),
+            token: try!(IoToken::new(&io, remote)),
+            handle: remote.clone(),
             readiness: AtomicUsize::new(0),
             io: io,
         })
