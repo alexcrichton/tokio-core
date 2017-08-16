@@ -122,7 +122,7 @@ pub struct CoreId(usize);
 /// Handles can be cloned, and when cloned they will still refer to the
 /// same underlying event loop.
 #[derive(Clone)]
-pub struct Remote {
+pub struct Handle {
     id: usize,
     core: Weak<Inner>,
 }
@@ -216,8 +216,8 @@ impl Core {
 
     /// Generates a remote handle to this event loop which can be used to spawn
     /// tasks from other threads into this event loop.
-    pub fn remote(&self) -> Remote {
-        Remote {
+    pub fn handle(&self) -> Handle {
+        Handle {
             id: self.inner.id,
             core: Arc::downgrade(&self.inner),
         }
@@ -551,7 +551,7 @@ impl<'a> CoreSync<'a> {
     }
 }
 
-impl Remote {
+impl Handle {
     fn send(&self, msg: Message) {
         self.with_loop(|opt| {
             match opt {
@@ -599,9 +599,9 @@ impl Remote {
     }
 }
 
-impl fmt::Debug for Remote {
+impl fmt::Debug for Handle {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Remote")
+        f.debug_struct("Handle")
          .field("id", &self.id())
          .finish()
     }

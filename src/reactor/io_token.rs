@@ -5,7 +5,7 @@ use std::io;
 use futures::task;
 use mio::event::Evented;
 
-use reactor::{Message, Remote, Direction};
+use reactor::{Message, Handle, Direction};
 
 /// A token that identifies an active timeout.
 pub struct IoToken {
@@ -31,8 +31,8 @@ impl IoToken {
     /// The returned future will panic if the event loop this handle is
     /// associated with has gone away, or if there is an error communicating
     /// with the event loop.
-    pub fn new(source: &Evented, remote: &Remote) -> io::Result<IoToken> {
-        match remote.core.upgrade() {
+    pub fn new(source: &Evented, handle: &Handle) -> io::Result<IoToken> {
+        match handle.core.upgrade() {
             Some(inner) => {
                 let (ready, token) = try!(inner.add_source(source));
                 Ok(IoToken { token: token, readiness: ready })
@@ -82,7 +82,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub fn schedule_read(&self, handle: &Remote) {
+    pub fn schedule_read(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Read));
     }
 
@@ -109,7 +109,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub fn schedule_write(&self, handle: &Remote) {
+    pub fn schedule_write(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Write));
     }
 
@@ -135,7 +135,7 @@ impl IoToken {
     /// This function will panic if the event loop this handle is associated
     /// with has gone away, or if there is an error communicating with the event
     /// loop.
-    pub fn drop_source(&self, handle: &Remote) {
+    pub fn drop_source(&self, handle: &Handle) {
         handle.send(Message::DropSource(self.token));
     }
 }
