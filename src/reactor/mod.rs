@@ -26,10 +26,12 @@ use slab::Slab;
 use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
 use self::cell::{CoreCell, CoreProof};
+use self::weak_notify::WeakHandle;
 
 mod cell;
 mod io_token;
 mod timeout_token;
+mod weak_notify;
 
 mod poll_evented;
 mod timeout;
@@ -50,7 +52,6 @@ scoped_thread_local!(static CURRENT_LOOP: Core);
 // TODO: expand this
 pub struct Core {
     events: mio::Events,
-
     io: Arc<CoreIo>,
     inner: Rc<RefCell<Inner>>,
 }
@@ -279,7 +280,7 @@ impl Core {
         loop {
             if future_fired {
                 let res = try!(CURRENT_LOOP.set(self, || {
-                    task.poll_future_notify(&self.io, 0)
+                    task.poll_future_notify(&WeakHandle(&self.io), 0)
                 }));
                 if let Async::Ready(e) = res {
                     return Ok(e)
@@ -465,7 +466,7 @@ impl Core {
                 let proof = &mut inner.proof_i_have_the_lock;
                 let rx = self.io.rx.get_mut(proof);
                 // TODO: can we do better than `.unwrap()` here?
-                rx.poll_stream_notify(&self.io, 1).unwrap()
+                rx.poll_stream_notify(&WeakHandle(&self.io), 1).unwrap()
             };
             match msg {
                 Async::Ready(Some(msg)) => self.notify(msg),
