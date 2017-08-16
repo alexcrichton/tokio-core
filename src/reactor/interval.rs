@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use futures::{Poll, Async};
 use futures::stream::{Stream};
 
-use reactor::{Handle, Core};
+use reactor::{self, Handle, Core};
 use reactor::timeout_token::TimeoutToken;
 
 /// A stream representing notifications at fixed interval
@@ -22,10 +22,9 @@ use reactor::timeout_token::TimeoutToken;
 /// they will likely fire some granularity after the exact instant that they're
 /// otherwise indicated to fire at.
 pub struct Interval {
-    token: TimeoutToken,
+    core: Option<(TimeoutToken, Handle)>,
     next: Instant,
     interval: Duration,
-    handle: Handle,
 }
 
 impl Interval {
@@ -35,8 +34,18 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// interval object. The interval object itself is then a stream which will
     /// be set to fire at the specified intervals
-    pub fn new(dur: Duration, core: &Core) -> Interval {
-        Interval::new_at(Instant::now() + dur, dur, core)
+    pub fn new(dur: Duration) -> Interval {
+        Interval::new_at(Instant::now() + dur, dur)
+    }
+
+    /// Creates a new interval which will fire at `dur` time into the future,
+    /// and will repeat every `dur` interval after
+    ///
+    /// This function will return a future that will resolve to the actual
+    /// interval object. The interval object itself is then a stream which will
+    /// be set to fire at the specified intervals
+    pub fn new_core(dur: Duration, core: &Core) -> Interval {
+        Interval::new_at_core(Instant::now() + dur, dur, core)
     }
 
     /// Creates a new interval which will fire at the time specified by `at`,
@@ -45,12 +54,30 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, dur: Duration, core: &Core) -> Interval {
+    pub fn new_at(at: Instant, dur: Duration) -> Interval {
+        match reactor::default_core() {
+            Ok(core) => Interval::new_at_core(at, dur, core),
+            Err(_) => {
+                Interval {
+                    core: None,
+                    interval: dur,
+                    next: at,
+                }
+            }
+        }
+    }
+
+    /// Creates a new interval which will fire at the time specified by `at`,
+    /// and then will repeat every `dur` interval after
+    ///
+    /// This function will return a future that will resolve to the actual
+    /// timeout object. The timeout object itself is then a future which will be
+    /// set to fire at the specified point in the future.
+    pub fn new_at_core(at: Instant, dur: Duration, core: &Core) -> Interval {
         Interval {
-            token: TimeoutToken::new(at, core),
+            core: Some((TimeoutToken::new(at, core), core.handle())),
             next: at,
             interval: dur,
-            handle: core.handle(),
         }
     }
 }
@@ -60,14 +87,19 @@ impl Stream for Interval {
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<Option<()>, io::Error> {
+        let (token, handle) = match self.core {
+            Some((ref a, ref b)) => (a, b),
+            None => return Err(io::Error::new(io::ErrorKind::Other,
+                                              "failed to create timer")),
+        };
         // TODO: is this fast enough?
         let now = Instant::now();
         if self.next <= now {
             self.next = next_interval(self.next, now, self.interval);
-            self.token.reset_timeout(self.next, &self.handle);
+            token.reset_timeout(self.next, &handle);
             Ok(Async::Ready(Some(())))
         } else {
-            self.token.update_timeout(&self.handle);
+            token.update_timeout(&handle);
             Ok(Async::NotReady)
         }
     }
@@ -75,7 +107,9 @@ impl Stream for Interval {
 
 impl Drop for Interval {
     fn drop(&mut self) {
-        self.token.cancel_timeout(&self.handle);
+        if let Some((ref token, ref handle)) = self.core {
+            token.cancel_timeout(handle);
+        }
     }
 }
 

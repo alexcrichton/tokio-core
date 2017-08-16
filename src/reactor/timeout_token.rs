@@ -34,7 +34,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub(super) fn reset_timeout(&mut self, at: Instant, handle: &Handle) {
+    pub(super) fn reset_timeout(&self, at: Instant, handle: &Handle) {
         handle.send(Message::ResetTimeout(self.token, at));
     }
 

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::{Future, Poll, Async};
 
-use reactor::{Handle, Core};
+use reactor::{self, Handle, Core};
 use reactor::timeout_token::TimeoutToken;
 
 /// A future representing the notification that a timeout has occurred.
@@ -19,9 +19,8 @@ use reactor::timeout_token::TimeoutToken;
 /// they will likely fire some granularity after the exact instant that they're
 /// otherwise indicated to fire at.
 pub struct Timeout {
-    token: TimeoutToken,
+    core: Option<(TimeoutToken, Handle)>,
     when: Instant,
-    handle: Handle,
 }
 
 impl Timeout {
@@ -30,8 +29,17 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new(dur: Duration, core: &Core) -> Timeout {
-        Timeout::new_at(Instant::now() + dur, core)
+    pub fn new(dur: Duration) -> Timeout {
+        Timeout::new_at(Instant::now() + dur)
+    }
+
+    /// Creates a new timeout which will fire at `dur` time into the future.
+    ///
+    /// This function will return a future that will resolve to the actual
+    /// timeout object. The timeout object itself is then a future which will be
+    /// set to fire at the specified point in the future.
+    pub fn new_core(dur: Duration, core: &Core) -> Timeout {
+        Timeout::new_at_core(Instant::now() + dur, core)
     }
 
     /// Creates a new timeout which will fire at the time specified by `at`.
@@ -39,11 +47,27 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, core: &Core) -> Timeout {
+    pub fn new_at(at: Instant) -> Timeout {
+        match reactor::default_core() {
+            Ok(core) => Timeout::new_at_core(at, core),
+            Err(_) => {
+                Timeout {
+                    core: None,
+                    when: at,
+                }
+            }
+        }
+    }
+
+    /// Creates a new timeout which will fire at the time specified by `at`.
+    ///
+    /// This function will return a future that will resolve to the actual
+    /// timeout object. The timeout object itself is then a future which will be
+    /// set to fire at the specified point in the future.
+    pub fn new_at_core(at: Instant, core: &Core) -> Timeout {
         Timeout {
-            token: TimeoutToken::new(at, core),
+            core: Some((TimeoutToken::new(at, core), core.handle())),
             when: at,
-            handle: core.handle(),
         }
     }
 
@@ -62,7 +86,9 @@ impl Timeout {
     /// has been called to ensure tha ta task is blocked on this future.
     pub fn reset(&mut self, at: Instant) {
         self.when = at;
-        self.token.reset_timeout(self.when, &self.handle);
+        if let Some((ref token, ref handle)) = self.core {
+            token.reset_timeout(self.when, handle);
+        }
     }
 }
 
@@ -71,12 +97,17 @@ impl Future for Timeout {
     type Error = io::Error;
 
     fn poll(&mut self) -> Poll<(), io::Error> {
+        let (token, handle) = match self.core {
+            Some((ref a, ref b)) => (a, b),
+            None => return Err(io::Error::new(io::ErrorKind::Other,
+                                              "failed to create timer")),
+        };
         // TODO: is this fast enough?
         let now = Instant::now();
         if self.when <= now {
             Ok(Async::Ready(()))
         } else {
-            self.token.update_timeout(&self.handle);
+            token.update_timeout(handle);
             Ok(Async::NotReady)
         }
     }
@@ -84,6 +115,8 @@ impl Future for Timeout {
 
 impl Drop for Timeout {
     fn drop(&mut self) {
-        self.token.cancel_timeout(&self.handle);
+        if let Some((ref token, ref handle)) = self.core {
+            token.cancel_timeout(handle);
+        }
     }
 }

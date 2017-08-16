@@ -21,13 +21,27 @@ impl UdpSocket {
     ///
     /// This function will create a new UDP socket and attempt to bind it to the
     /// `addr` provided. If the result is `Ok`, the socket has successfully bound.
-    pub fn bind(addr: &SocketAddr, core: &Core) -> io::Result<UdpSocket> {
+    pub fn bind(addr: &SocketAddr) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::bind(addr));
-        UdpSocket::new(udp, core)
+        UdpSocket::new(udp)
     }
 
-    fn new(socket: mio::net::UdpSocket, core: &Core) -> io::Result<UdpSocket> {
-        let io = try!(PollEvented::new(socket, core));
+    /// Create a new UDP socket bound to the specified address.
+    ///
+    /// This function will create a new UDP socket and attempt to bind it to the
+    /// `addr` provided. If the result is `Ok`, the socket has successfully bound.
+    pub fn bind_core(addr: &SocketAddr, core: &Core) -> io::Result<UdpSocket> {
+        let udp = try!(mio::net::UdpSocket::bind(addr));
+        UdpSocket::new_core(udp, core)
+    }
+
+    fn new(socket: mio::net::UdpSocket) -> io::Result<UdpSocket> {
+        let io = try!(PollEvented::new(socket));
+        Ok(UdpSocket { io: io })
+    }
+
+    fn new_core(socket: mio::net::UdpSocket, core: &Core) -> io::Result<UdpSocket> {
+        let io = try!(PollEvented::new_core(socket, core));
         Ok(UdpSocket { io: io })
     }
 
@@ -40,10 +54,24 @@ impl UdpSocket {
     /// This can be used in conjunction with net2's `UdpBuilder` interface to
     /// configure a socket before it's handed off, such as setting options like
     /// `reuse_address` or binding to multiple addresses.
-    pub fn from_socket(socket: net::UdpSocket,
-                       core: &Core) -> io::Result<UdpSocket> {
+    pub fn from_socket(socket: net::UdpSocket) -> io::Result<UdpSocket> {
         let udp = try!(mio::net::UdpSocket::from_socket(socket));
-        UdpSocket::new(udp, core)
+        UdpSocket::new(udp)
+    }
+
+    /// Creates a new `UdpSocket` from the previously bound socket provided.
+    ///
+    /// The socket given will be registered with the event loop that `handle` is
+    /// associated with. This function requires that `socket` has previously
+    /// been bound to an address to work correctly.
+    ///
+    /// This can be used in conjunction with net2's `UdpBuilder` interface to
+    /// configure a socket before it's handed off, such as setting options like
+    /// `reuse_address` or binding to multiple addresses.
+    pub fn from_socket_core(socket: net::UdpSocket,
+                            core: &Core) -> io::Result<UdpSocket> {
+        let udp = try!(mio::net::UdpSocket::from_socket(socket));
+        UdpSocket::new_core(udp, core)
     }
 
     /// Provides a `Stream` and `Sink` interface for reading and writing to this

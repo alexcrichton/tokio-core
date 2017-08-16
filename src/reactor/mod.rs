@@ -24,8 +24,10 @@ use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
 use self::cell::{CoreCell, CoreProof};
 use self::weak_notify::WeakHandle;
+use self::global::default_core;
 
 mod cell;
+mod global;
 mod io_token;
 mod timeout_token;
 mod weak_notify;

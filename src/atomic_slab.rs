@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::marker;
 use std::mem;
 use std::ptr;
-use std::sync::atomic::*;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::SeqCst;
 
 const N: usize = 1024;
