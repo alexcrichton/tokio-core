@@ -4,7 +4,7 @@
 //! happening in `tokio-core`. This reactor (or event loop) is used to run
 //! futures, schedule tasks, issue I/O requests, etc.
 
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::RefCell;
 use std::cmp;
 use std::fmt;
 use std::io::{self, ErrorKind};
@@ -25,7 +25,9 @@ use slab::Slab;
 
 use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
+use self::cell::{CoreCell, CoreProof};
 
+mod cell;
 mod io_token;
 mod timeout_token;
 
@@ -48,22 +50,12 @@ scoped_thread_local!(static CURRENT_LOOP: Core);
 // TODO: expand this
 pub struct Core {
     events: mio::Events,
-    rx: RefCell<Spawn<mpsc::UnboundedReceiver<Message>>>,
-    _rx_registration: mio::Registration,
-    rx_readiness: Arc<MySetReadiness>,
 
     io: Arc<CoreIo>,
     inner: Rc<RefCell<Inner>>,
-
-    // Used for determining when the future passed to `run` is ready. Once the
-    // registration is passed to `io` above we never touch it again, just keep
-    // it alive.
-    _future_registration: mio::Registration,
-    future_readiness: Arc<MySetReadiness>,
 }
 
 struct Inner {
-    id: usize,
     io: Arc<CoreIo>,
 
     // Dispatch slabs for I/O and futures events
@@ -76,13 +68,41 @@ struct Inner {
     // state of the timeout itself. The `TimeoutToken` type is an index into the
     // `timeouts` slab.
     timer_heap: Heap<(Instant, usize)>,
+
+    proof_i_have_the_lock: CoreProof,
 }
 
 struct CoreIo {
-    tx: mpsc::UnboundedSender<Message>,
+    id: usize,
+
+    // Actual event loop itself, aka an "epoll set"
     io: mio::Poll,
+
+    // An mpsc channel to send messages to the event loop
+    tx: mpsc::UnboundedSender<Message>,
+    rx: CoreCell<Spawn<mpsc::UnboundedReceiver<Message>>>,
+
+    // All known I/O objects and the tasks that are blocked on them. This slab
+    // gives each scheduled I/O an index which is used to refer to it elsewhere.
     io_dispatch: AtomicSlab<ScheduledIo>,
+
     timeouts: AtomicSlab<ScheduledTimer>,
+
+    // Used for determining when the future passed to `run` is ready. Once the
+    // registration is passed to `io` above we never touch it again, just keep
+    // it alive.
+    future_readiness: mio::SetReadiness,
+    _future_registration: mio::Registration,
+
+    // Used to keep track of when there are messages ready to be received by the
+    // event loop.
+    rx_readiness: mio::SetReadiness,
+    _rx_registration: mio::Registration,
+}
+
+fn _assert() {
+    fn _assert<T: Send + Sync>() {}
+    _assert::<CoreIo>();
 }
 
 /// An unique ID for a Core
@@ -115,7 +135,7 @@ pub struct Handle {
 
 struct ScheduledIo {
     readiness: Arc<AtomicUsize>,
-    inner: UnsafeCell<ScheduledIoInner>,
+    inner: CoreCell<ScheduledIoInner>,
 }
 
 // TODO: comment this
@@ -128,8 +148,8 @@ struct ScheduledIoInner {
 }
 
 struct ScheduledTimer {
-    heap_slot: UnsafeCell<Option<Slot>>,
-    state: UnsafeCell<TimeoutState>,
+    heap_slot: CoreCell<Option<Slot>>,
+    state: CoreCell<TimeoutState>,
 }
 
 // TODO: comment this
@@ -182,32 +202,30 @@ impl Core {
                          TOKEN_MESSAGES,
                          mio::Ready::readable(),
                          mio::PollOpt::level()));
-        let rx_readiness = Arc::new(MySetReadiness(channel_pair.1));
-        rx_readiness.notify(0);
 
         let io = Arc::new(CoreIo {
+            id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
             tx: tx,
+            rx: CoreCell::new(executor::spawn(rx)),
             io: io,
             io_dispatch: AtomicSlab::new(),
             timeouts: AtomicSlab::new(),
+
+            future_readiness: future_pair.1,
+            _future_registration: future_pair.0,
+            rx_readiness: channel_pair.1,
+            _rx_registration: channel_pair.0,
         });
+        io.rx_readiness.set_readiness(mio::Ready::readable()).unwrap();
 
         Ok(Core {
             events: mio::Events::with_capacity(1024),
-            rx: RefCell::new(executor::spawn(rx)),
-            _rx_registration: channel_pair.0,
-            rx_readiness: rx_readiness,
-
-            _future_registration: future_pair.0,
-            future_readiness: Arc::new(MySetReadiness(future_pair.1)),
-
             io: io.clone(),
-
             inner: Rc::new(RefCell::new(Inner {
-                id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
                 task_dispatch: Slab::with_capacity(1),
                 timer_heap: Heap::new(),
                 io: io,
+                proof_i_have_the_lock: unsafe { CoreProof::new() },
             })),
         })
     }
@@ -229,7 +247,7 @@ impl Core {
     /// tasks from other threads into this event loop.
     pub fn remote(&self) -> Remote {
         Remote {
-            id: self.inner.borrow().id,
+            id: self.io.id,
             core: Arc::downgrade(&self.io),
         }
     }
@@ -261,7 +279,7 @@ impl Core {
         loop {
             if future_fired {
                 let res = try!(CURRENT_LOOP.set(self, || {
-                    task.poll_future_notify(&self.future_readiness, 0)
+                    task.poll_future_notify(&self.io, 0)
                 }));
                 if let Async::Ready(e) = res {
                     return Ok(e)
@@ -324,10 +342,10 @@ impl Core {
             trace!("event {:?} {:?}", event.readiness(), event.token());
 
             if token == TOKEN_MESSAGES {
-                self.rx_readiness.0.set_readiness(mio::Ready::empty()).unwrap();
+                self.io.rx_readiness.set_readiness(mio::Ready::empty()).unwrap();
                 CURRENT_LOOP.set(&self, || self.consume_queue());
             } else if token == TOKEN_FUTURE {
-                self.future_readiness.0.set_readiness(mio::Ready::empty()).unwrap();
+                self.io.future_readiness.set_readiness(mio::Ready::empty()).unwrap();
                 fired = true;
             } else {
                 self.dispatch(token, event.readiness());
@@ -349,16 +367,17 @@ impl Core {
     fn dispatch_io(&mut self, token: usize, ready: mio::Ready) {
         let mut reader = None;
         let mut writer = None;
-        let inner = self.inner.borrow();
-        if let Some(io) = inner.io.io_dispatch.get(token) {
-            io.readiness.fetch_or(ready2usize(ready), Ordering::Relaxed);
-            // TODO: why unsafe comment
-            unsafe {
+        let mut inner = self.inner.borrow_mut();
+        {
+            let inner = &mut *inner;
+            if let Some(io) = inner.io.io_dispatch.get(token) {
+                let proof = &mut inner.proof_i_have_the_lock;
+                io.readiness.fetch_or(ready2usize(ready), Ordering::Relaxed);
                 if ready.is_writable() {
-                    writer = (*io.inner.get()).writer.take();
+                    writer = io.inner.get_mut(proof).writer.take();
                 }
                 if !(ready & (!mio::Ready::writable())).is_empty() {
-                    reader = (*io.inner.get()).reader.take();
+                    reader = io.inner.get_mut(proof).reader.take();
                 }
             }
         }
@@ -406,21 +425,21 @@ impl Core {
     fn consume_timeouts(&mut self, now: Instant) {
         loop {
             let mut inner = self.inner.borrow_mut();
-            match inner.timer_heap.peek() {
-                Some(head) if head.0 <= now => {}
-                Some(_) => break,
-                None => break,
-            };
-            let (_, slab_idx) = inner.timer_heap.pop().unwrap();
+            let handle = {
+                let inner = &mut *inner;
+                let proof = &mut inner.proof_i_have_the_lock;
+                match inner.timer_heap.peek() {
+                    Some(head) if head.0 <= now => {}
+                    Some(_) => break,
+                    None => break,
+                };
+                let (_, slab_idx) = inner.timer_heap.pop().unwrap();
 
-            trace!("firing timeout: {}", slab_idx);
-            // TODO: comment why unsafe
-            //
-            // TODO: think about whether this can panic
-            let handle = unsafe {
+                trace!("firing timeout: {}", slab_idx);
+                // TODO: think about whether this can panic
                 let timeout = inner.io.timeouts.get(slab_idx).expect("slab index missing");
-                (*timeout.heap_slot.get()).take().unwrap();
-                (*timeout.state.get()).fire()
+                timeout.heap_slot.get_mut(proof).take().unwrap();
+                timeout.state.get_mut(proof).fire()
             };
             drop(inner);
             if let Some(handle) = handle {
@@ -440,9 +459,14 @@ impl Core {
 
     fn consume_queue(&self) {
         debug!("consuming notification queue");
-        // TODO: can we do better than `.unwrap()` here?
         loop {
-            let msg = self.rx.borrow_mut().poll_stream_notify(&self.rx_readiness, 0).unwrap();
+            let msg = {
+                let mut inner = self.inner.borrow_mut();
+                let proof = &mut inner.proof_i_have_the_lock;
+                let rx = self.io.rx.get_mut(proof);
+                // TODO: can we do better than `.unwrap()` here?
+                rx.poll_stream_notify(&self.io, 1).unwrap()
+            };
             match msg {
                 Async::Ready(Some(msg)) => self.notify(msg),
                 Async::NotReady |
@@ -478,7 +502,7 @@ impl Core {
 
     /// Get the ID of this loop
     pub fn id(&self) -> CoreId {
-        CoreId(self.inner.borrow().id)
+        CoreId(self.io.id)
     }
 }
 
@@ -510,54 +534,47 @@ impl Inner {
     fn schedule(&mut self, token: usize, wake: Task, dir: Direction)
                 -> Option<Task> {
         debug!("scheduling direction for: {}", token);
-        // TODO: why unsafe comment
-        unsafe {
-            let sched = self.io.io_dispatch.get(token).unwrap();
-            let slots = &mut *sched.inner.get();
-            let (slot, ready) = match dir {
-                Direction::Read => (&mut slots.reader, !mio::Ready::writable()),
-                Direction::Write => (&mut slots.writer, mio::Ready::writable()),
-            };
-            if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
-                debug!("cancelling block");
-                *slot = None;
-                Some(wake)
-            } else {
-                debug!("blocking");
-                *slot = Some(wake);
-                None
-            }
+        let sched = self.io.io_dispatch.get(token).unwrap();
+        let proof = &mut self.proof_i_have_the_lock;
+        let slots = sched.inner.get_mut(proof);
+        let (slot, ready) = match dir {
+            Direction::Read => (&mut slots.reader, !mio::Ready::writable()),
+            Direction::Write => (&mut slots.writer, mio::Ready::writable()),
+        };
+        if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
+            debug!("cancelling block");
+            *slot = None;
+            Some(wake)
+        } else {
+            debug!("blocking");
+            *slot = Some(wake);
+            None
         }
     }
 
     fn update_timeout(&mut self, token: usize, handle: Task) -> Option<Task> {
         debug!("updating a timeout: {}", token);
-        // TODO: comment unsafe
-        //
         // TODO: think about whether this can panic
-        unsafe {
-            let timeout = self.io.timeouts.get(token).expect("timeout missing");
-            (*timeout.state.get()).block(handle)
-        }
+        let proof = &mut self.proof_i_have_the_lock;
+        let timeout = self.io.timeouts.get(token).expect("timeout missing");
+        timeout.state.get_mut(proof).block(handle)
     }
 
     fn reset_timeout(&mut self, token: usize, at: Instant) {
+        let proof = &mut self.proof_i_have_the_lock;
         // TODO: think about whether this can panic
         let state = self.io.timeouts.get(token).expect("timeout token missing");
+
         // TODO: avoid remove + push and instead just do one sift of the heap?
         // In theory we could update it in place and then do the percolation
         // as necessary
-        //
-        // TODO: comment unsafe
-        unsafe {
-            if let Some(slot) = (*state.heap_slot.get()).take() {
-                self.timer_heap.remove(slot);
-            }
-            let slot = self.timer_heap.push((at, token));
-            *state.heap_slot.get() = Some(slot);
-            *state.state.get() = TimeoutState::NotFired;
-            debug!("set a timeout: {}", token);
+        if let Some(slot) = state.heap_slot.get_mut(proof).take() {
+            self.timer_heap.remove(slot);
         }
+        let slot = self.timer_heap.push((at, token));
+        *state.heap_slot.get_mut(proof) = Some(slot);
+        *state.state.get_mut(proof) = TimeoutState::NotFired;
+        debug!("set a timeout: {}", token);
     }
 
     fn cancel_timeout(&mut self, token: usize) {
@@ -626,7 +643,7 @@ impl Remote {
     {
         if CURRENT_LOOP.is_set() {
             CURRENT_LOOP.with(|lp| {
-                let same = lp.inner.borrow().id == self.id;
+                let same = lp.io.id == self.id;
                 if same {
                     f(Some(lp))
                 } else {
@@ -683,7 +700,7 @@ impl Remote {
     pub fn handle(&self) -> Option<Handle> {
         if CURRENT_LOOP.is_set() {
             CURRENT_LOOP.with(|lp| {
-                let same = lp.inner.borrow().id == self.id;
+                let same = lp.io.id == self.id;
                 if same {
                     Some(lp.handle())
                 } else {
@@ -702,7 +719,7 @@ impl CoreIo {
         debug!("adding a new I/O source");
         let sched = ScheduledIo {
             readiness: Arc::new(AtomicUsize::new(0)),
-            inner: UnsafeCell::new(ScheduledIoInner {
+            inner: CoreCell::new(ScheduledIoInner {
                 reader: None,
                 writer: None,
             }),
@@ -720,8 +737,8 @@ impl CoreIo {
 
     fn add_timeout(&self) -> usize {
         self.timeouts.insert(ScheduledTimer {
-            heap_slot: UnsafeCell::new(None),
-            state: UnsafeCell::new(TimeoutState::NotFired),
+            heap_slot: CoreCell::new(None),
+            state: CoreCell::new(TimeoutState::NotFired),
         })
     }
 }
@@ -833,6 +850,18 @@ impl Notify for MySetReadiness {
     fn notify(&self, _id: usize) {
         self.0.set_readiness(mio::Ready::readable())
               .expect("failed to set readiness");
+    }
+}
+
+impl Notify for CoreIo {
+    fn notify(&self, id: usize) {
+        let readiness = if id == 0 {
+            &self.future_readiness
+        } else {
+            &self.rx_readiness
+        };
+        readiness.set_readiness(mio::Ready::readable())
+            .expect("failed to set readiness");
     }
 }
 
