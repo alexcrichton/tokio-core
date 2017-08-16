@@ -4,13 +4,13 @@
 //! happening in `tokio-core`. This reactor (or event loop) is used to run
 //! futures, schedule tasks, issue I/O requests, etc.
 
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::cmp;
 use std::fmt;
 use std::io::{self, ErrorKind};
 use std::mem;
 use std::rc::{Rc, Weak};
-use std::sync::Arc;
+use std::sync::{Arc, Weak as WeakArc};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
@@ -23,6 +23,7 @@ use mio;
 use mio::event::Evented;
 use slab::Slab;
 
+use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
 
 mod io_token;
@@ -47,11 +48,11 @@ scoped_thread_local!(static CURRENT_LOOP: Core);
 // TODO: expand this
 pub struct Core {
     events: mio::Events,
-    tx: mpsc::UnboundedSender<Message>,
     rx: RefCell<Spawn<mpsc::UnboundedReceiver<Message>>>,
     _rx_registration: mio::Registration,
     rx_readiness: Arc<MySetReadiness>,
 
+    io: Arc<CoreIo>,
     inner: Rc<RefCell<Inner>>,
 
     // Used for determining when the future passed to `run` is ready. Once the
@@ -63,10 +64,9 @@ pub struct Core {
 
 struct Inner {
     id: usize,
-    io: mio::Poll,
+    io: Arc<CoreIo>,
 
     // Dispatch slabs for I/O and futures events
-    io_dispatch: Slab<ScheduledIo>,
     task_dispatch: Slab<ScheduledTask>,
 
     // Timer wheel keeping track of all timeouts. The `usize` stored in the
@@ -76,7 +76,13 @@ struct Inner {
     // state of the timeout itself. The `TimeoutToken` type is an index into the
     // `timeouts` slab.
     timer_heap: Heap<(Instant, usize)>,
-    timeouts: Slab<(Option<Slot>, TimeoutState)>,
+}
+
+struct CoreIo {
+    tx: mpsc::UnboundedSender<Message>,
+    io: mio::Poll,
+    io_dispatch: AtomicSlab<ScheduledIo>,
+    timeouts: AtomicSlab<ScheduledTimer>,
 }
 
 /// An unique ID for a Core
@@ -96,7 +102,7 @@ pub struct CoreId(usize);
 #[derive(Clone)]
 pub struct Remote {
     id: usize,
-    tx: mpsc::UnboundedSender<Message>,
+    core: WeakArc<CoreIo>,
 }
 
 /// A non-sendable handle to an event loop, useful for manufacturing instances
@@ -109,9 +115,26 @@ pub struct Handle {
 
 struct ScheduledIo {
     readiness: Arc<AtomicUsize>,
+    inner: UnsafeCell<ScheduledIoInner>,
+}
+
+// TODO: comment this
+unsafe impl Send for ScheduledIo {}
+unsafe impl Sync for ScheduledIo {}
+
+struct ScheduledIoInner {
     reader: Option<Task>,
     writer: Option<Task>,
 }
+
+struct ScheduledTimer {
+    heap_slot: UnsafeCell<Option<Slot>>,
+    state: UnsafeCell<TimeoutState>,
+}
+
+// TODO: comment this
+unsafe impl Send for ScheduledTimer {}
+unsafe impl Sync for ScheduledTimer {}
 
 struct ScheduledTask {
     _registration: mio::Registration,
@@ -162,9 +185,15 @@ impl Core {
         let rx_readiness = Arc::new(MySetReadiness(channel_pair.1));
         rx_readiness.notify(0);
 
+        let io = Arc::new(CoreIo {
+            tx: tx,
+            io: io,
+            io_dispatch: AtomicSlab::new(),
+            timeouts: AtomicSlab::new(),
+        });
+
         Ok(Core {
             events: mio::Events::with_capacity(1024),
-            tx: tx,
             rx: RefCell::new(executor::spawn(rx)),
             _rx_registration: channel_pair.0,
             rx_readiness: rx_readiness,
@@ -172,13 +201,13 @@ impl Core {
             _future_registration: future_pair.0,
             future_readiness: Arc::new(MySetReadiness(future_pair.1)),
 
+            io: io.clone(),
+
             inner: Rc::new(RefCell::new(Inner {
                 id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
-                io: io,
-                io_dispatch: Slab::with_capacity(1),
                 task_dispatch: Slab::with_capacity(1),
-                timeouts: Slab::with_capacity(1),
                 timer_heap: Heap::new(),
+                io: io,
             })),
         })
     }
@@ -201,7 +230,7 @@ impl Core {
     pub fn remote(&self) -> Remote {
         Remote {
             id: self.inner.borrow().id,
-            tx: self.tx.clone(),
+            core: Arc::downgrade(&self.io),
         }
     }
 
@@ -273,7 +302,7 @@ impl Core {
 
         // Block waiting for an event to happen, peeling out how many events
         // happened.
-        let amt = match self.inner.borrow_mut().io.poll(&mut self.events, timeout) {
+        let amt = match self.io.io.poll(&mut self.events, timeout) {
             Ok(a) => a,
             Err(ref e) if e.kind() == ErrorKind::Interrupted => return false,
             Err(e) => panic!("error in poll: {}", e),
@@ -320,14 +349,17 @@ impl Core {
     fn dispatch_io(&mut self, token: usize, ready: mio::Ready) {
         let mut reader = None;
         let mut writer = None;
-        let mut inner = self.inner.borrow_mut();
-        if let Some(io) = inner.io_dispatch.get_mut(token) {
+        let inner = self.inner.borrow();
+        if let Some(io) = inner.io.io_dispatch.get(token) {
             io.readiness.fetch_or(ready2usize(ready), Ordering::Relaxed);
-            if ready.is_writable() {
-                writer = io.writer.take();
-            }
-            if !(ready & (!mio::Ready::writable())).is_empty() {
-                reader = io.reader.take();
+            // TODO: why unsafe comment
+            unsafe {
+                if ready.is_writable() {
+                    writer = (*io.inner.get()).writer.take();
+                }
+                if !(ready & (!mio::Ready::writable())).is_empty() {
+                    reader = (*io.inner.get()).reader.take();
+                }
             }
         }
         drop(inner);
@@ -382,8 +414,14 @@ impl Core {
             let (_, slab_idx) = inner.timer_heap.pop().unwrap();
 
             trace!("firing timeout: {}", slab_idx);
-            inner.timeouts[slab_idx].0.take().unwrap();
-            let handle = inner.timeouts[slab_idx].1.fire();
+            // TODO: comment why unsafe
+            //
+            // TODO: think about whether this can panic
+            let handle = unsafe {
+                let timeout = inner.io.timeouts.get(slab_idx).expect("slab index missing");
+                (*timeout.heap_slot.get()).take().unwrap();
+                (*timeout.state.get()).fire()
+            };
             drop(inner);
             if let Some(handle) = handle {
                 self.notify_handle(handle);
@@ -461,91 +499,78 @@ impl fmt::Debug for Core {
 }
 
 impl Inner {
-    fn add_source(&mut self, source: &Evented)
-                  -> io::Result<(Arc<AtomicUsize>, usize)> {
-        debug!("adding a new I/O source");
-        let sched = ScheduledIo {
-            readiness: Arc::new(AtomicUsize::new(0)),
-            reader: None,
-            writer: None,
-        };
-        if self.io_dispatch.vacant_entry().is_none() {
-            let amt = self.io_dispatch.len();
-            self.io_dispatch.reserve_exact(amt);
-        }
-        let entry = self.io_dispatch.vacant_entry().unwrap();
-        try!(self.io.register(source,
-                              mio::Token(TOKEN_START + entry.index() * 2),
-                              mio::Ready::readable() |
-                                mio::Ready::writable() |
-                                platform::all(),
-                              mio::PollOpt::edge()));
-        Ok((sched.readiness.clone(), entry.insert(sched).index()))
-    }
-
-    fn deregister_source(&mut self, source: &Evented) -> io::Result<()> {
-        self.io.deregister(source)
-    }
-
     fn drop_source(&mut self, token: usize) {
         debug!("dropping I/O source: {}", token);
-        self.io_dispatch.remove(token).unwrap();
+        // TODO: why unsafe comment
+        unsafe {
+            self.io.io_dispatch.remove(token);
+        }
     }
 
     fn schedule(&mut self, token: usize, wake: Task, dir: Direction)
                 -> Option<Task> {
         debug!("scheduling direction for: {}", token);
-        let sched = self.io_dispatch.get_mut(token).unwrap();
-        let (slot, ready) = match dir {
-            Direction::Read => (&mut sched.reader, !mio::Ready::writable()),
-            Direction::Write => (&mut sched.writer, mio::Ready::writable()),
-        };
-        if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
-            debug!("cancelling block");
-            *slot = None;
-            Some(wake)
-        } else {
-            debug!("blocking");
-            *slot = Some(wake);
-            None
+        // TODO: why unsafe comment
+        unsafe {
+            let sched = self.io.io_dispatch.get(token).unwrap();
+            let slots = &mut *sched.inner.get();
+            let (slot, ready) = match dir {
+                Direction::Read => (&mut slots.reader, !mio::Ready::writable()),
+                Direction::Write => (&mut slots.writer, mio::Ready::writable()),
+            };
+            if sched.readiness.load(Ordering::SeqCst) & ready2usize(ready) != 0 {
+                debug!("cancelling block");
+                *slot = None;
+                Some(wake)
+            } else {
+                debug!("blocking");
+                *slot = Some(wake);
+                None
+            }
         }
-    }
-
-    fn add_timeout(&mut self, at: Instant) -> usize {
-        if self.timeouts.vacant_entry().is_none() {
-            let len = self.timeouts.len();
-            self.timeouts.reserve_exact(len);
-        }
-        let entry = self.timeouts.vacant_entry().unwrap();
-        let slot = self.timer_heap.push((at, entry.index()));
-        let entry = entry.insert((Some(slot), TimeoutState::NotFired));
-        debug!("added a timeout: {}", entry.index());
-        return entry.index();
     }
 
     fn update_timeout(&mut self, token: usize, handle: Task) -> Option<Task> {
         debug!("updating a timeout: {}", token);
-        self.timeouts[token].1.block(handle)
+        // TODO: comment unsafe
+        //
+        // TODO: think about whether this can panic
+        unsafe {
+            let timeout = self.io.timeouts.get(token).expect("timeout missing");
+            (*timeout.state.get()).block(handle)
+        }
     }
 
     fn reset_timeout(&mut self, token: usize, at: Instant) {
-        let pair = &mut self.timeouts[token];
+        // TODO: think about whether this can panic
+        let state = self.io.timeouts.get(token).expect("timeout token missing");
         // TODO: avoid remove + push and instead just do one sift of the heap?
         // In theory we could update it in place and then do the percolation
         // as necessary
-        if let Some(slot) = pair.0.take() {
-            self.timer_heap.remove(slot);
+        //
+        // TODO: comment unsafe
+        unsafe {
+            if let Some(slot) = (*state.heap_slot.get()).take() {
+                self.timer_heap.remove(slot);
+            }
+            let slot = self.timer_heap.push((at, token));
+            *state.heap_slot.get() = Some(slot);
+            *state.state.get() = TimeoutState::NotFired;
+            debug!("set a timeout: {}", token);
         }
-        let slot = self.timer_heap.push((at, token));
-        *pair = (Some(slot), TimeoutState::NotFired);
-        debug!("set a timeout: {}", token);
     }
 
     fn cancel_timeout(&mut self, token: usize) {
         debug!("cancel a timeout: {}", token);
-        let pair = self.timeouts.remove(token);
-        if let Some((Some(slot), _state)) = pair {
-            self.timer_heap.remove(slot);
+        // TODO: comment unsafe
+        //
+        // TODO: can we cancel a timeout twice by accident?
+        unsafe {
+            let ScheduledTimer { heap_slot, state } = self.io.timeouts.remove(token);
+            drop(state);
+            if let Some(slot) = heap_slot.into_inner() {
+                self.timer_heap.remove(slot);
+            }
         }
     }
 
@@ -557,10 +582,10 @@ impl Inner {
         let entry = self.task_dispatch.vacant_entry().unwrap();
         let token = TOKEN_START + 2 * entry.index() + 1;
         let pair = mio::Registration::new2();
-        self.io.register(&pair.0,
-                         mio::Token(token),
-                         mio::Ready::readable(),
-                         mio::PollOpt::level())
+        self.io.io.register(&pair.0,
+                            mio::Token(token),
+                            mio::Ready::readable(),
+                            mio::PollOpt::level())
             .expect("cannot fail future registration with mio");
         let unpark = Arc::new(MySetReadiness(pair.1));
         unpark.notify(0);
@@ -583,14 +608,14 @@ impl Remote {
                     lp.notify(msg);
                 }
                 None => {
-                    match self.tx.unbounded_send(msg) {
-                        Ok(()) => {}
-
-                        // TODO: this error should punt upwards and we should
-                        //       notify the caller that the message wasn't
-                        //       received. This is tokio-core#17
-                        Err(e) => drop(e),
-                    }
+                    let err = match self.core.upgrade() {
+                        Some(io) => (&io.tx).send(msg).is_err(),
+                        None => true,
+                    };
+                    // TODO: this error should punt upwards and we should
+                    //       notify the caller that the message wasn't
+                    //       received. This is tokio-core#17
+                    drop(err);
                 }
             }
         })
@@ -668,6 +693,36 @@ impl Remote {
         } else {
             None
         }
+    }
+}
+
+impl CoreIo {
+    fn add_source(&self, source: &Evented)
+                  -> io::Result<(Arc<AtomicUsize>, usize)> {
+        debug!("adding a new I/O source");
+        let sched = ScheduledIo {
+            readiness: Arc::new(AtomicUsize::new(0)),
+            inner: UnsafeCell::new(ScheduledIoInner {
+                reader: None,
+                writer: None,
+            }),
+        };
+        let ret = sched.readiness.clone();
+        let idx = self.io_dispatch.insert(sched);
+        try!(self.io.register(source,
+                              mio::Token(TOKEN_START + idx * 2),
+                              mio::Ready::readable() |
+                                 mio::Ready::writable() |
+                                 platform::all(),
+                              mio::PollOpt::edge()));
+        Ok((ret, idx))
+    }
+
+    fn add_timeout(&self) -> usize {
+        self.timeouts.insert(ScheduledTimer {
+            heap_slot: UnsafeCell::new(None),
+            state: UnsafeCell::new(TimeoutState::NotFired),
+        })
     }
 }
 

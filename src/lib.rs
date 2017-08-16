@@ -110,6 +110,7 @@ extern crate log;
 #[doc(hidden)]
 pub mod io;
 
+mod atomic_slab;
 mod heap;
 #[doc(hidden)]
 pub mod channel;

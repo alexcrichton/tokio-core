@@ -105,13 +105,12 @@ impl<E: Evented> PollEvented<E> {
     /// This consumes `self` as it will no longer provide events after the
     /// method is called, and will likely return an error if this `PollEvented`
     /// was created on a separate event loop from the `handle` specified.
-    pub fn deregister(self, handle: &Handle) -> io::Result<()> {
-        let inner = match handle.inner.upgrade() {
+    pub fn deregister(self) -> io::Result<()> {
+        let io = match self.handle.core.upgrade() {
             Some(inner) => inner,
             None => return Ok(()),
         };
-        let ret = inner.borrow_mut().deregister_source(&self.io);
-        return ret
+        io.io.deregister(&self.io)
     }
 }
 
