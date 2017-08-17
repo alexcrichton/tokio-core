@@ -14,7 +14,7 @@ impl TimeoutToken {
     /// specified task.
     pub fn new(at: Instant, core: &Core) -> TimeoutToken {
         let token = core.inner.add_timeout();
-        core.send(Message::ResetTimeout(token, at));
+        core.handle().send(Message::ResetTimeout(token, at));
         TimeoutToken { token: token }
     }
 

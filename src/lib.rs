@@ -110,6 +110,9 @@ extern crate log;
 #[doc(hidden)]
 pub mod io;
 
+#[macro_use]
+mod statik;
+
 mod atomic_slab;
 mod heap;
 #[doc(hidden)]

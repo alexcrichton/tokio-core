@@ -49,7 +49,7 @@ impl Timeout {
     /// set to fire at the specified point in the future.
     pub fn new_at(at: Instant) -> Timeout {
         match reactor::default_core() {
-            Ok(core) => Timeout::new_at_core(at, core),
+            Ok(core) => Timeout::new_at_core(at, &core),
             Err(_) => {
                 Timeout {
                     core: None,

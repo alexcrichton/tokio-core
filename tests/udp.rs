@@ -7,7 +7,6 @@ use std::net::SocketAddr;
 
 use futures::{Future, Poll};
 use tokio_core::net::UdpSocket;
-use tokio_core::reactor::Core;
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -18,15 +17,14 @@ macro_rules! t {
 
 #[test]
 fn send_messages() {
-    let mut l = t!(Core::new());
-    let a = t!(UdpSocket::bind(&t!("127.0.0.1:0".parse()), &l.handle()));
-    let b = t!(UdpSocket::bind(&t!("127.0.0.1:0".parse()), &l.handle()));
+    let a = t!(UdpSocket::bind(&t!("127.0.0.1:0".parse())));
+    let b = t!(UdpSocket::bind(&t!("127.0.0.1:0".parse())));
     let a_addr = t!(a.local_addr());
     let b_addr = t!(b.local_addr());
 
     let send = SendMessage { socket: a, addr: b_addr };
     let recv = RecvMessage { socket: b, expected_addr: a_addr };
-    t!(l.run(send.join(recv)));
+    t!(send.join(recv).wait());
 }
 
 struct SendMessage {

@@ -272,14 +272,6 @@ impl Core {
     pub fn id(&self) -> CoreId {
         CoreId(self.inner.id)
     }
-
-    fn send(&self, msg: Message) {
-        // Need to execute all existing requests first, to ensure
-        // that our message is processed "in order"
-        let sync = CoreSync::new(self);
-        sync.consume_queue();
-        sync.notify(msg);
-    }
 }
 
 impl fmt::Debug for Core {
@@ -313,10 +305,12 @@ impl Inner {
     }
 
     fn add_timeout(&self) -> usize {
-        self.timeouts.insert(ScheduledTimer {
+        let ret = self.timeouts.insert(ScheduledTimer {
             heap_slot: CoreCell::new(None),
             state: CoreCell::new(TimeoutState::NotFired),
-        })
+        });
+        debug!("adding a timeout: {}", ret);
+        return ret
     }
 }
 
@@ -519,6 +513,7 @@ impl<'a> CoreSync<'a> {
     }
 
     fn reset_timeout(&self, token: usize, at: Instant) {
+        debug!("reset");
         let proof = &mut *self.proof();
         // TODO: think about whether this can panic
         let state = self.inner.timeouts.get(token).expect("timeout token missing");

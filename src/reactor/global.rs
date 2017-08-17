@@ -1,39 +1,50 @@
 use std::io;
-use std::sync::{Once, ONCE_INIT};
+use std::sync::Arc;
 use std::thread;
 
-use reactor::Core;
-use futures::future;
+use futures::sync::oneshot;
+use reactor::{Core, Inner};
 
-pub fn default_core() -> io::Result<&'static Core> {
-    static INIT: Once = ONCE_INIT;
-    static mut CORE: *const Core = 0 as *const Core;
+struct HelperThread {
+    thread: Option<thread::JoinHandle<()>>,
+    tx: Option<oneshot::Sender<()>>,
+    core: Option<Arc<Inner>>,
+}
 
-    unsafe {
-        let mut err = None;
-        INIT.call_once(|| {
-            let core = match Core::new() {
-                Ok(c) => c,
-                Err(e) => {
-                    err = Some(e);
-                    return
-                }
-            };
-            CORE = Box::into_raw(Box::new(core));
-            thread::spawn(|| helper(&*CORE));
-        });
-        if CORE.is_null() {
-            match err {
-                Some(e) => Err(e),
-                None => Err(io::Error::new(io::ErrorKind::Other,
-                                           "creation of core failed"))
-            }
-        } else {
-            Ok(&*CORE)
+pub fn default_core() -> io::Result<Core> {
+    statik!(static DEFAULT: HelperThread = HelperThread::new());
+    match DEFAULT.with(|h| h.core.clone()) {
+        Some(Some(inner)) => Ok(Core { inner }),
+        Some(None) => Err(io::Error::new(io::ErrorKind::Other, "global core failed to be created")),
+        None => Err(io::Error::new(io::ErrorKind::Other, "global core has been shut down")),
+
+    }
+}
+
+impl HelperThread {
+    fn new() -> HelperThread {
+        let core = match Core::new() {
+            Ok(core) => core,
+            Err(_) => return HelperThread {
+                thread: None,
+                tx: None,
+                core: None,
+            },
+        };
+        let (tx, rx) = oneshot::channel();
+        let inner = core.inner.clone();
+        let thread = thread::spawn(move || drop(core.run(rx)));
+        HelperThread {
+            thread: Some(thread),
+            tx: Some(tx),
+            core: Some(inner),
         }
     }
 }
 
-fn helper(core: &'static Core) {
-    core.run(future::empty::<(), ()>()).unwrap();
+impl Drop for HelperThread {
+    fn drop(&mut self) {
+        drop(self.tx.take());
+        drop(self.thread.take().unwrap().join());
+    }
 }

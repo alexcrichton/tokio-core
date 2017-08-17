@@ -10,7 +10,6 @@ use std::net::Shutdown;
 use bytes::{BytesMut, BufMut};
 use futures::{Future, Stream, Sink};
 use tokio_core::net::{TcpListener, TcpStream};
-use tokio_core::reactor::Core;
 use tokio_io::codec::{Encoder, Decoder};
 use tokio_io::io::{write_all, read};
 use tokio_io::AsyncRead;
@@ -52,10 +51,7 @@ impl Encoder for LineCodec {
 fn echo() {
     drop(env_logger::init());
 
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-
-    let listener = TcpListener::bind(&"127.0.0.1:0".parse().unwrap(), &handle).unwrap();
+    let listener = TcpListener::bind(&"127.0.0.1:0".parse().unwrap()).unwrap();
     let addr = listener.local_addr().unwrap();
     let srv = listener.incoming().for_each(move |(socket, _)| {
         let (sink, stream) = socket.framed(LineCodec).split();

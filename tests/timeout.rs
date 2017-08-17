@@ -4,7 +4,8 @@ extern crate tokio_core;
 
 use std::time::{Instant, Duration};
 
-use tokio_core::reactor::{Core, Timeout};
+use futures::Future;
+use tokio_core::reactor::Timeout;
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -16,11 +17,10 @@ macro_rules! t {
 #[test]
 fn smoke() {
     drop(env_logger::init());
-    let mut l = t!(Core::new());
     let dur = Duration::from_millis(10);
-    let timeout = t!(Timeout::new(dur, &l.handle()));
+    let timeout = Timeout::new(dur);
     let start = Instant::now();
-    t!(l.run(timeout));
+    t!(timeout.wait());
     assert!(start.elapsed() >= (dur / 2));
 }
 
@@ -28,10 +28,9 @@ fn smoke() {
 fn two() {
     drop(env_logger::init());
 
-    let mut l = t!(Core::new());
     let dur = Duration::from_millis(10);
-    let timeout = t!(Timeout::new(dur, &l.handle()));
-    t!(l.run(timeout));
-    let timeout = t!(Timeout::new(dur, &l.handle()));
-    t!(l.run(timeout));
+    let timeout = Timeout::new(dur);
+    t!(timeout.wait());
+    let timeout = Timeout::new(dur);
+    t!(timeout.wait());
 }

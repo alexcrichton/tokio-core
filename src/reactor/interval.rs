@@ -56,7 +56,7 @@ impl Interval {
     /// set to fire at the specified point in the future.
     pub fn new_at(at: Instant, dur: Duration) -> Interval {
         match reactor::default_core() {
-            Ok(core) => Interval::new_at_core(at, dur, core),
+            Ok(core) => Interval::new_at_core(at, dur, &core),
             Err(_) => {
                 Interval {
                     core: None,

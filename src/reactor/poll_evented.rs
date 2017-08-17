@@ -85,7 +85,7 @@ impl<E: Evented> PollEvented<E> {
     /// This method returns a future which will resolve to the readiness stream
     /// when it's ready.
     pub fn new(io: E) -> io::Result<PollEvented<E>> {
-        PollEvented::new_core(io, reactor::default_core()?)
+        PollEvented::new_core(io, &reactor::default_core()?)
     }
 
     /// Creates a new readiness stream associated with the provided
