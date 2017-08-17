@@ -11,14 +11,19 @@ struct HelperThread {
     core: Option<Arc<Inner>>,
 }
 
+statik!(static DEFAULT: HelperThread = HelperThread::new());
+
 pub fn default_core() -> io::Result<Core> {
-    statik!(static DEFAULT: HelperThread = HelperThread::new());
     match DEFAULT.with(|h| h.core.clone()) {
         Some(Some(inner)) => Ok(Core { inner }),
         Some(None) => Err(io::Error::new(io::ErrorKind::Other, "global core failed to be created")),
         None => Err(io::Error::new(io::ErrorKind::Other, "global core has been shut down")),
-
     }
+}
+
+#[allow(dead_code)]
+pub fn shutdown_global() {
+    DEFAULT.drop();
 }
 
 impl HelperThread {

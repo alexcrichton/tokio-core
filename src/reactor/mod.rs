@@ -236,6 +236,19 @@ impl Core {
     /// This method will **not** catch panics from polling the future `f`. If
     /// the future panics then it's the responsibility of the caller to catch
     /// that panic and handle it as appropriate.
+    ///
+    /// # Concurrent behavior
+    ///
+    /// Note that concurrent usage of the `run` and `turn` methods isn't really
+    /// supported right now and while possible it's not recommended to invoke
+    /// these methods concurrently. Both of them acquire exclusive locks,
+    /// meaning that if one thread is calling `run` then any other thread
+    /// calling `run` or `turn` will be blocked until the first thread returns.
+    /// This is unlikely to be the desired behavior, so it's recommended to
+    /// avoid concurrently calling these methods.
+    ///
+    /// We'd like to fix this property in the future though! Stay tuned for more
+    /// information about concurrently using a `Core`.
     pub fn run<F>(&self, f: F) -> Result<F::Item, F::Error>
         where F: Future,
     {
@@ -243,17 +256,17 @@ impl Core {
         let mut future_fired = true;
         let sync = CoreSync::new(self);
 
-        loop {
-            if future_fired {
-                let res = try!(sync.with_tls_vars(|| {
-                    task.poll_future_notify(&WeakHandle(&self.inner), 0)
-                }));
-                if let Async::Ready(e) = res {
-                    return Ok(e)
+        sync.with_tls_vars(|| {
+            loop {
+                if future_fired {
+                    let res = try!(task.poll_future_notify(&WeakHandle(&self.inner), 0));
+                    if let Async::Ready(e) = res {
+                        return Ok(e)
+                    }
                 }
+                future_fired = sync.poll(None);
             }
-            future_fired = sync.poll(None);
-        }
+        })
     }
 
     /// Performs one iteration of the event loop, blocking on waiting for events
@@ -264,8 +277,22 @@ impl Core {
     ///
     /// `loop { lp.turn(None) }` is equivalent to calling `run` with an
     /// empty future (one that never finishes).
+    ///
+    /// # Concurrent behavior
+    ///
+    /// Note that concurrent usage of the `run` and `turn` methods isn't really
+    /// supported right now and while possible it's not recommended to invoke
+    /// these methods concurrently. Both of them acquire exclusive locks,
+    /// meaning that if one thread is calling `run` then any other thread
+    /// calling `run` or `turn` will be blocked until the first thread returns.
+    /// This is unlikely to be the desired behavior, so it's recommended to
+    /// avoid concurrently calling these methods.
+    ///
+    /// We'd like to fix this property in the future though! Stay tuned for more
+    /// information about concurrently using a `Core`.
     pub fn turn(&self, max_wait: Option<Duration>) {
-        CoreSync::new(self).poll(max_wait);
+        let sync = CoreSync::new(self);
+        sync.with_tls_vars(|| drop(sync.poll(max_wait)))
     }
 
     /// Get the ID of this loop
@@ -365,7 +392,7 @@ impl<'a> CoreSync<'a> {
 
             if token == TOKEN_MESSAGES {
                 self.inner.rx_readiness.set_readiness(mio::Ready::empty()).unwrap();
-                self.with_tls_vars(|| self.consume_queue());
+                self.consume_queue();
             } else if token == TOKEN_FUTURE {
                 self.inner.future_readiness.set_readiness(mio::Ready::empty()).unwrap();
                 fired = true;
@@ -393,10 +420,10 @@ impl<'a> CoreSync<'a> {
         }
         // TODO: don't notify the same task twice
         if let Some(reader) = reader {
-            self.notify_handle(reader);
+            reader.notify();
         }
         if let Some(writer) = writer {
-            self.notify_handle(writer);
+            writer.notify();
         }
     }
 
@@ -418,18 +445,9 @@ impl<'a> CoreSync<'a> {
                 timeout.state.get_mut(proof).fire()
             };
             if let Some(handle) = handle {
-                self.notify_handle(handle);
+                handle.notify();
             }
         }
-    }
-
-    /// Method used to notify a task handle.
-    ///
-    /// Note that this should be used instead of `handle.notify()` to ensure
-    /// that the `CURRENT_LOOP` variable is set appropriately.
-    fn notify_handle(&self, handle: Task) {
-        debug!("notifying a task handle");
-        self.with_tls_vars(|| handle.notify())
     }
 
     fn with_tls_vars<F, R>(&self, f: F) -> R
@@ -496,7 +514,7 @@ impl<'a> CoreSync<'a> {
                 return
             }
         };
-        self.notify_handle(task);
+        task.notify();
     }
 
     fn update_timeout(&self, token: usize, handle: Task) {
@@ -508,7 +526,7 @@ impl<'a> CoreSync<'a> {
             timeout.state.get_mut(proof).block(handle)
         };
         if let Some(task) = task {
-            self.notify_handle(task);
+            task.notify();
         }
     }
 
