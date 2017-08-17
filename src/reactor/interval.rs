@@ -38,16 +38,6 @@ impl Interval {
         Interval::new_at(Instant::now() + dur, dur)
     }
 
-    /// Creates a new interval which will fire at `dur` time into the future,
-    /// and will repeat every `dur` interval after
-    ///
-    /// This function will return a future that will resolve to the actual
-    /// interval object. The interval object itself is then a stream which will
-    /// be set to fire at the specified intervals
-    pub fn new_core(dur: Duration, core: &Core) -> Interval {
-        Interval::new_at_core(Instant::now() + dur, dur, core)
-    }
-
     /// Creates a new interval which will fire at the time specified by `at`,
     /// and then will repeat every `dur` interval after
     ///
@@ -56,7 +46,13 @@ impl Interval {
     /// set to fire at the specified point in the future.
     pub fn new_at(at: Instant, dur: Duration) -> Interval {
         match Core::current() {
-            Ok(core) => Interval::new_at_core(at, dur, &core),
+            Ok(core) => {
+                Interval {
+                    core: Some((TimeoutToken::new(at, &core), core.handle())),
+                    next: at,
+                    interval: dur,
+                }
+            }
             Err(_) => {
                 Interval {
                     core: None,
@@ -64,20 +60,6 @@ impl Interval {
                     next: at,
                 }
             }
-        }
-    }
-
-    /// Creates a new interval which will fire at the time specified by `at`,
-    /// and then will repeat every `dur` interval after
-    ///
-    /// This function will return a future that will resolve to the actual
-    /// timeout object. The timeout object itself is then a future which will be
-    /// set to fire at the specified point in the future.
-    pub fn new_at_core(at: Instant, dur: Duration, core: &Core) -> Interval {
-        Interval {
-            core: Some((TimeoutToken::new(at, core), core.handle())),
-            next: at,
-            interval: dur,
         }
     }
 }

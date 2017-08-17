@@ -10,7 +10,7 @@ use futures::{Future, Poll, Async};
 use mio;
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use reactor::{Core, PollEvented};
+use reactor::PollEvented;
 
 /// An I/O object representing a TCP socket listening for incoming connections.
 ///
@@ -34,15 +34,6 @@ impl TcpListener {
     pub fn bind(addr: &SocketAddr) -> io::Result<TcpListener> {
         let l = try!(mio::net::TcpListener::bind(addr));
         TcpListener::new(l)
-    }
-
-    /// Create a new TCP listener associated with this event loop.
-    ///
-    /// The TCP listener will bind to the provided `addr` address, if available.
-    /// If the result is `Ok`, the socket has successfully bound.
-    pub fn bind_core(addr: &SocketAddr, core: &Core) -> io::Result<TcpListener> {
-        let l = try!(mio::net::TcpListener::bind(addr));
-        TcpListener::new_core(l, core)
     }
 
     /// Attempt to accept a connection and create a new connected `TcpStream` if
@@ -115,49 +106,8 @@ impl TcpListener {
         TcpListener::new(l)
     }
 
-    /// Create a new TCP listener from the standard library's TCP listener.
-    ///
-    /// This method can be used when the `Handle::tcp_listen` method isn't
-    /// sufficient because perhaps some more configuration is needed in terms of
-    /// before the calls to `bind` and `listen`.
-    ///
-    /// This API is typically paired with the `net2` crate and the `TcpBuilder`
-    /// type to build up and customize a listener before it's shipped off to the
-    /// backing event loop. This allows configuration of options like
-    /// `SO_REUSEPORT`, binding to multiple addresses, etc.
-    ///
-    /// The `addr` argument here is one of the addresses that `listener` is
-    /// bound to and the listener will only be guaranteed to accept connections
-    /// of the same address type currently.
-    ///
-    /// Finally, the `handle` argument is the event loop that this listener will
-    /// be bound to.
-    ///
-    /// The platform specific behavior of this function looks like:
-    ///
-    /// * On Unix, the socket is placed into nonblocking mode and connections
-    ///   can be accepted as normal
-    ///
-    /// * On Windows, the address is stored internally and all future accepts
-    ///   will only be for the same IP version as `addr` specified. That is, if
-    ///   `addr` is an IPv4 address then all sockets accepted will be IPv4 as
-    ///   well (same for IPv6).
-    pub fn from_listener_core(listener: net::TcpListener,
-                              addr: &SocketAddr,
-                              core: &Core) -> io::Result<TcpListener> {
-        let l = try!(mio::net::TcpListener::from_listener(listener, addr));
-        TcpListener::new_core(l, core)
-    }
-
     fn new(listener: mio::net::TcpListener) -> io::Result<TcpListener> {
         let io = try!(PollEvented::new(listener));
-        Ok(TcpListener { io: io })
-    }
-
-    fn new_core(listener: mio::net::TcpListener, core: &Core)
-        -> io::Result<TcpListener>
-    {
-        let io = try!(PollEvented::new_core(listener, core));
         Ok(TcpListener { io: io })
     }
 
@@ -275,32 +225,8 @@ impl TcpStream {
         TcpStreamNew { inner: inner }
     }
 
-    /// Create a new TCP stream connected to the specified address.
-    ///
-    /// This function will create a new TCP socket and attempt to connect it to
-    /// the `addr` provided. The returned future will be resolved once the
-    /// stream has successfully connected. If an error happens during the
-    /// connection or during the socket creation, that error will be returned to
-    /// the future instead.
-    pub fn connect_core(addr: &SocketAddr, core: &Core) -> TcpStreamNew {
-        let inner = match mio::net::TcpStream::connect(addr) {
-            Ok(tcp) => TcpStream::new_core(tcp, core),
-            Err(e) => TcpStreamNewState::Error(e),
-        };
-        TcpStreamNew { inner: inner }
-    }
-
     fn new(connected_stream: mio::net::TcpStream) -> TcpStreamNewState {
         match PollEvented::new(connected_stream) {
-            Ok(io) => TcpStreamNewState::Waiting(TcpStream { io: io }),
-            Err(e) => TcpStreamNewState::Error(e),
-        }
-    }
-
-    fn new_core(connected_stream: mio::net::TcpStream, core: &Core)
-        -> TcpStreamNewState
-    {
-        match PollEvented::new_core(connected_stream, core) {
             Ok(io) => TcpStreamNewState::Waiting(TcpStream { io: io }),
             Err(e) => TcpStreamNewState::Error(e),
         }
@@ -315,20 +241,6 @@ impl TcpStream {
         let inner = try!(mio::net::TcpStream::from_stream(stream));
         Ok(TcpStream {
             io: try!(PollEvented::new(inner)),
-        })
-    }
-
-    /// Create a new `TcpStream` from a `net::TcpStream`.
-    ///
-    /// This function will convert a TCP stream in the standard library to a TCP
-    /// stream ready to be used with the provided event loop handle. The object
-    /// returned is associated with the event loop and ready to perform I/O.
-    pub fn from_stream_core(stream: net::TcpStream, core: &Core)
-        -> io::Result<TcpStream>
-    {
-        let inner = try!(mio::net::TcpStream::from_stream(stream));
-        Ok(TcpStream {
-            io: try!(PollEvented::new_core(inner, core)),
         })
     }
 
@@ -355,36 +267,6 @@ impl TcpStream {
     {
         let state = match mio::net::TcpStream::connect_stream(stream, addr) {
             Ok(tcp) => TcpStream::new(tcp),
-            Err(e) => TcpStreamNewState::Error(e),
-        };
-        Box::new(state)
-    }
-
-    /// Creates a new `TcpStream` from the pending socket inside the given
-    /// `std::net::TcpStream`, connecting it to the address specified.
-    ///
-    /// This constructor allows configuring the socket before it's actually
-    /// connected, and this function will transfer ownership to the returned
-    /// `TcpStream` if successful. An unconnected `TcpStream` can be created
-    /// with the `net2::TcpBuilder` type (and also configured via that route).
-    ///
-    /// The platform specific behavior of this function looks like:
-    ///
-    /// * On Unix, the socket is placed into nonblocking mode and then a
-    ///   `connect` call is issued.
-    ///
-    /// * On Windows, the address is stored internally and the connect operation
-    ///   is issued when the returned `TcpStream` is registered with an event
-    ///   loop. Note that on Windows you must `bind` a socket before it can be
-    ///   connected, so if a custom `TcpBuilder` is used it should be bound
-    ///   (perhaps to `INADDR_ANY`) before this method is called.
-    pub fn connect_stream_core(stream: net::TcpStream,
-                               addr: &SocketAddr,
-                               core: &Core)
-        -> Box<Future<Item=TcpStream, Error=io::Error> + Send>
-    {
-        let state = match mio::net::TcpStream::connect_stream(stream, addr) {
-            Ok(tcp) => TcpStream::new_core(tcp, core),
             Err(e) => TcpStreamNewState::Error(e),
         };
         Box::new(state)

@@ -33,15 +33,6 @@ impl Timeout {
         Timeout::new_at(Instant::now() + dur)
     }
 
-    /// Creates a new timeout which will fire at `dur` time into the future.
-    ///
-    /// This function will return a future that will resolve to the actual
-    /// timeout object. The timeout object itself is then a future which will be
-    /// set to fire at the specified point in the future.
-    pub fn new_core(dur: Duration, core: &Core) -> Timeout {
-        Timeout::new_at_core(Instant::now() + dur, core)
-    }
-
     /// Creates a new timeout which will fire at the time specified by `at`.
     ///
     /// This function will return a future that will resolve to the actual
@@ -49,25 +40,18 @@ impl Timeout {
     /// set to fire at the specified point in the future.
     pub fn new_at(at: Instant) -> Timeout {
         match Core::current() {
-            Ok(core) => Timeout::new_at_core(at, &core),
+            Ok(core) => {
+                Timeout {
+                    core: Some((TimeoutToken::new(at, &core), core.handle())),
+                    when: at,
+                }
+            }
             Err(_) => {
                 Timeout {
                     core: None,
                     when: at,
                 }
             }
-        }
-    }
-
-    /// Creates a new timeout which will fire at the time specified by `at`.
-    ///
-    /// This function will return a future that will resolve to the actual
-    /// timeout object. The timeout object itself is then a future which will be
-    /// set to fire at the specified point in the future.
-    pub fn new_at_core(at: Instant, core: &Core) -> Timeout {
-        Timeout {
-            core: Some((TimeoutToken::new(at, core), core.handle())),
-            when: at,
         }
     }
 
