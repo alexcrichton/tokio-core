@@ -18,8 +18,8 @@ macro_rules! t {
 fn smoke() {
     drop(env_logger::init());
     let dur = Duration::from_millis(10);
-    let timeout = Timeout::new(dur);
     let start = Instant::now();
+    let timeout = Timeout::new(dur);
     t!(timeout.wait());
     assert!(start.elapsed() >= (dur / 2));
 }

@@ -28,15 +28,13 @@ use futures::Future;
 use futures::stream::{self, Stream};
 use tokio_io::IoFuture;
 use tokio_core::net::{TcpListener, TcpStream};
-use tokio_core::reactor::Core;
 
 fn main() {
     env_logger::init().unwrap();
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:8080".to_string());
     let addr = addr.parse::<SocketAddr>().unwrap();
 
-    let mut l = Core::new().unwrap();
-    let socket = TcpListener::bind(&addr, &l.handle()).unwrap();
+    let socket = TcpListener::bind(&addr).unwrap();
     println!("Listening on: {}", addr);
     let server = socket.incoming().and_then(|(socket, addr)| {
         println!("got a socket: {}", addr);
@@ -45,7 +43,7 @@ fn main() {
         println!("lost the socket");
         Ok(())
     });
-    l.run(server).unwrap();
+    server.wait().unwrap();
 }
 
 fn write(socket: TcpStream) -> IoFuture<()> {

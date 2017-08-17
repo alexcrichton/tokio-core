@@ -22,7 +22,6 @@ use bytes::{BufMut, BytesMut};
 use futures::sync::mpsc;
 use futures::{Sink, Future, Stream};
 use tokio_core::net::TcpStream;
-use tokio_core::reactor::Core;
 use tokio_io::AsyncRead;
 use tokio_io::codec::{Encoder, Decoder};
 
@@ -34,9 +33,7 @@ fn main() {
     let addr = addr.parse::<SocketAddr>().unwrap();
 
     // Create the event loop and initiate the connection to the remote server
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-    let tcp = TcpStream::connect(&addr, &handle);
+    let tcp = TcpStream::connect(&addr);
 
     // Right now Tokio doesn't support a handle to stdin running on the event
     // loop, so we farm out that work to a separate thread. This thread will
@@ -76,7 +73,7 @@ fn main() {
     });
 
     // And now that we've got our client, we execute it in the event loop!
-    core.run(client).unwrap();
+    client.wait().unwrap();
 }
 
 /// A simple `Codec` implementation that just ships bytes around.

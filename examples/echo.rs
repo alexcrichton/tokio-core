@@ -26,10 +26,10 @@ use std::net::SocketAddr;
 
 use futures::Future;
 use futures::stream::Stream;
+use futures::unsync::CurrentThread;
+use tokio_core::net::TcpListener;
 use tokio_io::AsyncRead;
 use tokio_io::io::copy;
-use tokio_core::net::TcpListener;
-use tokio_core::reactor::Core;
 
 fn main() {
     // Allow passing an address to listen on as the first argument of this
@@ -38,24 +38,11 @@ fn main() {
     let addr = env::args().nth(1).unwrap_or("127.0.0.1:8080".to_string());
     let addr = addr.parse::<SocketAddr>().unwrap();
 
-    // First up we'll create the event loop that's going to drive this server.
-    // This is done by creating an instance of the `Core` type, tokio-core's
-    // event loop. Most functions in tokio-core return an `io::Result`, and
-    // `Core::new` is no exception. For this example, though, we're mostly just
-    // ignoring errors, so we unwrap the return value.
-    //
-    // After the event loop is created we acquire a handle to it through the
-    // `handle` method. With this handle we'll then later be able to create I/O
-    // objects and spawn futures.
-    let mut core = Core::new().unwrap();
-    let handle = core.handle();
-
-    // Next up we create a TCP listener which will listen for incoming
+    // First up we create a TCP listener which will listen for incoming
     // connections. This TCP listener is bound to the address we determined
-    // above and must be associated with an event loop, so we pass in a handle
-    // to our event loop. After the socket's created we inform that we're ready
+    // above and and after the socket's created we inform that we're ready
     // to go and start accepting connections.
-    let socket = TcpListener::bind(&addr, &handle).unwrap();
+    let socket = TcpListener::bind(&addr).unwrap();
     println!("Listening on: {}", addr);
 
     // Here we convert the `TcpListener` to a stream of incoming connections
@@ -114,18 +101,18 @@ fn main() {
         //
         // Essentially here we're spawning a new task to run concurrently, which
         // will allow all of our clients to be processed concurrently.
-        handle.spawn(msg);
+        CurrentThread.spawn(msg);
 
         Ok(())
     });
 
     // And finally now that we've define what our server is, we run it! We
-    // didn't actually do much I/O up to this point and this `Core::run` method
+    // didn't actually do much I/O up to this point and this `wait` method
     // is responsible for driving the entire server to completion.
     //
-    // The `run` method will return the result of the future that it's running,
+    // The `wait` method will return the result of the future that it's running,
     // but in our case the `done` future won't ever finish because a TCP
     // listener is never done accepting clients. That basically just means that
     // we're going to be running the server until it's killed (e.g. ctrl-c).
-    core.run(done).unwrap();
+    done.wait().unwrap();
 }

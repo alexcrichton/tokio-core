@@ -13,12 +13,13 @@ use std::sync::{Arc, Weak, Mutex, MutexGuard};
 use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
-use futures::{Future, Async};
 use futures::executor::{self, Spawn, Notify};
 use futures::sync::mpsc;
 use futures::task::Task;
-use mio;
+use futures::unsync::CurrentThread;
+use futures::{Future, Async};
 use mio::event::Evented;
+use mio;
 
 use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
@@ -355,6 +356,8 @@ impl<'a> CoreSync<'a> {
     }
 
     fn poll(&self, max_wait: Option<Duration>) -> bool {
+        CurrentThread.poll(&WeakHandle(&self.inner), 0);
+
         // Given the `max_wait` variable specified, figure out the actual
         // timeout that we're going to pass to `poll`. This involves taking a
         // look at active timers on our heap as well.
@@ -596,7 +599,7 @@ impl Handle {
                 }
                 None => {
                     let err = match self.core.upgrade() {
-                        Some(io) => (&io.tx).send(msg).is_err(),
+                        Some(io) => io.tx.unbounded_send(msg).is_err(),
                         None => true,
                     };
                     // TODO: this error should punt upwards and we should

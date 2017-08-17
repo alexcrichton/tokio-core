@@ -10,8 +10,6 @@
 
 use std::mem;
 
-use slab::Slab;
-
 pub struct Heap<T> {
     // Binary heap of items, plus the slab index indicating what position in the
     // list they're in.
@@ -19,7 +17,13 @@ pub struct Heap<T> {
 
     // A map from a slab index (assigned to an item above) to the actual index
     // in the array the item appears at.
-    index: Slab<usize>,
+    index: Vec<SlabSlot<usize>>,
+    next_index: usize,
+}
+
+enum SlabSlot<T> {
+    Empty { next: usize },
+    Full { value: T },
 }
 
 pub struct Slot {
@@ -30,7 +34,8 @@ impl<T: Ord> Heap<T> {
     pub fn new() -> Heap<T> {
         Heap {
             items: Vec::new(),
-            index: Slab::with_capacity(128),
+            index: Vec::new(),
+            next_index: 0,
         }
     }
 
@@ -42,10 +47,17 @@ impl<T: Ord> Heap<T> {
     pub fn push(&mut self, t: T) -> Slot {
         self.assert_consistent();
         let len = self.items.len();
-        if self.index.available() == 0 {
-            self.index.reserve_exact(len);
-        }
-        let slot_idx = self.index.insert(len).unwrap();
+        let slot = SlabSlot::Full { value: len };
+        let slot_idx = if self.next_index == self.index.len() {
+            self.next_index += 1;
+            self.index.push(slot);
+            self.index.len() - 1
+        } else {
+            match mem::replace(&mut self.index[self.next_index], slot) {
+                SlabSlot::Empty { next } => mem::replace(&mut self.next_index, next),
+                SlabSlot::Full { .. } => panic!(),
+            }
+        };
         self.items.push((t, slot_idx));
         self.percolate_up(len);
         self.assert_consistent();
@@ -68,11 +80,16 @@ impl<T: Ord> Heap<T> {
 
     pub fn remove(&mut self, slot: Slot) -> T {
         self.assert_consistent();
-        let idx = self.index.remove(slot.idx).unwrap();
+        let empty = SlabSlot::Empty { next: self.next_index };
+        let idx = match mem::replace(&mut self.index[slot.idx], empty) {
+            SlabSlot::Full { value } => value,
+            SlabSlot::Empty { .. } => panic!(),
+        };
+        self.next_index = slot.idx;
         let (item, slot_idx) = self.items.swap_remove(idx);
         debug_assert_eq!(slot.idx, slot_idx);
         if idx < self.items.len() {
-            self.index[self.items[idx].1] = idx;
+            set_index(&mut self.index, self.items[idx].1, idx);
             if self.items[idx].0 < item {
                 self.percolate_up(idx);
             } else {
@@ -91,8 +108,8 @@ impl<T: Ord> Heap<T> {
             }
             let (a, b) = self.items.split_at_mut(idx);
             mem::swap(&mut a[parent], &mut b[0]);
-            self.index[a[parent].1] = parent;
-            self.index[b[0].1] = idx;
+            set_index(&mut self.index, a[parent].1, parent);
+            set_index(&mut self.index, b[0].1, idx);
             idx = parent;
         }
         return idx
@@ -132,8 +149,8 @@ impl<T: Ord> Heap<T> {
                 self.items.split_at_mut(right)
             };
             mem::swap(&mut a[idx], &mut b[0]);
-            self.index[a[idx].1] = idx;
-            self.index[b[0].1] = a.len();
+            set_index(&mut self.index, a[idx].1,  idx);
+            set_index(&mut self.index, b[0].1, a.len());
             idx = a.len();
         }
         return idx
@@ -144,12 +161,21 @@ impl<T: Ord> Heap<T> {
             return
         }
 
-        assert_eq!(self.items.len(), self.index.len());
+        assert_eq!(self.items.len(), self.index.iter().filter(|slot| {
+            match **slot {
+                SlabSlot::Full { .. } => true,
+                SlabSlot::Empty { .. } => false,
+            }
+        }).count());
 
         for (i, &(_, j)) in self.items.iter().enumerate() {
-            if self.index[j] != i {
+            let index = match self.index[j] {
+                SlabSlot::Full { value } => value,
+                SlabSlot::Empty { .. } => panic!(),
+            };
+            if index != i {
                 panic!("self.index[j] != i : i={} j={} self.index[j]={}",
-                       i, j, self.index[j]);
+                       i, j, index);
             }
         }
 
@@ -164,6 +190,15 @@ impl<T: Ord> Heap<T> {
                 assert!(*item <= right.0, "bad right at index: {}", i);
             }
         }
+    }
+}
+
+fn set_index<T>(slab: &mut Vec<SlabSlot<T>>,
+                slab_slot: usize,
+                val: T) {
+    match slab[slab_slot] {
+        SlabSlot::Full { ref mut value } => *value = val,
+        SlabSlot::Empty { .. } => panic!(),
     }
 }
 

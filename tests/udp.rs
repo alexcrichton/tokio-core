@@ -1,6 +1,7 @@
 extern crate futures;
-#[macro_use]
 extern crate tokio_core;
+#[macro_use]
+extern crate tokio_io;
 
 use std::io;
 use std::net::SocketAddr;
