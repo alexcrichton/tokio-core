@@ -203,6 +203,11 @@ impl Core {
                 inner: Mutex::new(SynchronizedInner {
                     events: RefCell::new(mio::Events::with_capacity(1024)),
                     timer_heap: RefCell::new(Heap::new()),
+
+                    // This is the one instance of `CoreProof` we'll create for
+                    // this core, hence the `unsafe` block. This is basically
+                    // just upholding the contract of `CoreCell` and
+                    // `CoreProof`.
                     proof_i_have_the_lock: RefCell::new(unsafe { CoreProof::new() }),
                 }),
             }),
@@ -488,7 +493,14 @@ impl<'a> CoreSync<'a> {
 
     fn drop_source(&self, token: usize) {
         debug!("dropping I/O source: {}", token);
-        // TODO: why unsafe comment
+
+        // This is `unsafe` because it's up to us to rely on not having any
+        // concurrent calls to `get` on `io_dispatch` for the token provided
+        // here. We're guaranteed that all calls to `get` happen on this
+        // `CoreSync` type, which means they're at least all synchronized to
+        // just our thread. Furthermore we know that when we call `drop_source`
+        // that there's no other calls to `add` in scope (by construction of
+        // this module), so the unsafety here should be ok
         unsafe {
             self.inner.io_dispatch.remove(token);
         }
@@ -550,7 +562,12 @@ impl<'a> CoreSync<'a> {
 
     fn cancel_timeout(&self, token: usize) {
         debug!("cancel a timeout: {}", token);
-        // TODO: comment unsafe
+        // The unsafety here, like the unsafety in `drop_source`, stems from the
+        // fact that removing from an `AtomicSlab` is unsafe with respect to
+        // concurrent calls to `get`. Like with `drop_source` though all calls
+        // to `get` are on `CoreSync` which means we're synchronized to this
+        // thread, and when this function is called there should be no active
+        // calls to `get`, which means it should be safe to remove the token.
         //
         // TODO: can we cancel a timeout twice by accident?
         unsafe {
