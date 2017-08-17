@@ -25,7 +25,6 @@ use atomic_slab::AtomicSlab;
 use heap::{Heap, Slot};
 use self::cell::{CoreCell, CoreProof};
 use self::weak_notify::WeakHandle;
-use self::global::default_core;
 
 mod cell;
 mod global;
@@ -43,6 +42,7 @@ pub use self::interval::Interval;
 static NEXT_LOOP_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
 scoped_thread_local!(static CURRENT: *const CoreSync<'static>);
+thread_local!(static DEFAULT: RefCell<Option<Core>> = RefCell::new(None));
 
 /// An event loop.
 ///
@@ -165,6 +165,12 @@ enum Message {
     CancelTimeout(usize),
 }
 
+/// Structure returned from `Core::push_current`
+pub struct PushCurrent<'a> {
+    prev: Option<Core>,
+    _cur: &'a Core,
+}
+
 const TOKEN_MESSAGES: mio::Token = mio::Token(0);
 const TOKEN_FUTURE: mio::Token = mio::Token(1);
 const TOKEN_START: usize = 2;
@@ -213,6 +219,49 @@ impl Core {
                 }),
             }),
         })
+    }
+
+    /// Acquire a reference to this thread's current core.
+    ///
+    /// This function may return different values when called over time, but the
+    /// core returned here is the core that all I/O objects and timeouts will be
+    /// associated with on construction.
+    ///
+    /// # Errors
+    ///
+    /// If this function falls back to creating the global `Core` it may return
+    /// an error, which is indicated through the return value.
+    pub fn current() -> io::Result<Core> {
+        DEFAULT.with(|default| {
+            match *default.borrow() {
+                Some(ref core) => Ok(Core { inner: core.inner.clone() }),
+                None => Core::global(),
+            }
+        })
+    }
+
+    /// Acquire a reference to the global default `Core`.
+    ///
+    /// This function will acquire a reference to the global `Core` which is
+    /// being executed on a helper thread in the application. The core returned
+    /// here is the same each time this function is called.
+    ///
+    /// # Errors
+    ///
+    /// If this function initializes the global `Core` it may return
+    /// an error, which is indicated through the return value.
+    pub fn global() -> io::Result<Core> {
+        global::default_core()
+    }
+
+    /// Flags this core as the "current core" for all future operations.
+    ///
+    /// Calling this function affects the return value of `Core::current`. The
+    /// most recent call to `push_current` in this thread is what will be
+    /// returned from `Core::current`. When the `PushCurrent` struct here falls
+    /// out of scope then the previous current core will be restored.
+    pub fn push_current<'a>(&'a self) -> PushCurrent<'a> {
+        PushCurrent::new(self)
     }
 
     /// Generates a remote handle to this event loop which can be used to spawn
@@ -671,6 +720,28 @@ impl Notify for Inner {
         };
         readiness.set_readiness(mio::Ready::readable())
             .expect("failed to set readiness");
+    }
+}
+
+impl<'a> PushCurrent<'a> {
+    fn new(core: &'a Core) -> PushCurrent<'a> {
+        DEFAULT.with(|default| {
+            let mut default = default.borrow_mut();
+            let prev = default.take();
+            *default = Some(Core { inner: core.inner.clone() });
+            PushCurrent {
+                prev: prev,
+                _cur: core,
+            }
+        })
+    }
+}
+
+impl<'a> Drop for PushCurrent<'a> {
+    fn drop(&mut self) {
+        DEFAULT.with(|default| {
+            *default.borrow_mut() = self.prev.take();
+        })
     }
 }
 

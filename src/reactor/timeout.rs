@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use futures::{Future, Poll, Async};
 
-use reactor::{self, Handle, Core};
+use reactor::{Handle, Core};
 use reactor::timeout_token::TimeoutToken;
 
 /// A future representing the notification that a timeout has occurred.
@@ -48,7 +48,7 @@ impl Timeout {
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
     pub fn new_at(at: Instant) -> Timeout {
-        match reactor::default_core() {
+        match Core::current() {
             Ok(core) => Timeout::new_at_core(at, &core),
             Err(_) => {
                 Timeout {
