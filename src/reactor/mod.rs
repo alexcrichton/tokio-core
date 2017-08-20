@@ -42,7 +42,6 @@ pub use self::interval::Interval;
 static NEXT_LOOP_ID: AtomicUsize = ATOMIC_USIZE_INIT;
 
 scoped_thread_local!(static CURRENT: *const CoreSync<'static>);
-thread_local!(static DEFAULT: RefCell<Option<Core>> = RefCell::new(None));
 
 /// An event loop.
 ///
@@ -53,6 +52,7 @@ thread_local!(static DEFAULT: RefCell<Option<Core>> = RefCell::new(None));
 // TODO: expand this
 pub struct Core {
     inner: Arc<Inner>,
+    handle: Handle,
 }
 
 struct Inner {
@@ -126,9 +126,14 @@ pub struct CoreId(usize);
 /// Handles can be cloned, and when cloned they will still refer to the
 /// same underlying event loop.
 #[derive(Clone)]
-struct Handle {
-    id: usize,
-    core: Weak<Inner>,
+pub struct Handle {
+    repr: HandleRepr,
+}
+
+#[derive(Clone)]
+enum HandleRepr {
+    Ptr { id: usize, inner: Weak<Inner> },
+    Global,
 }
 
 struct ScheduledIo {
@@ -165,12 +170,6 @@ enum Message {
     CancelTimeout(usize),
 }
 
-/// Structure returned from `Core::push_current`
-pub struct PushCurrent<'a> {
-    prev: Option<Core>,
-    _cur: &'a Core,
-}
-
 const TOKEN_MESSAGES: mio::Token = mio::Token(0);
 const TOKEN_FUTURE: mio::Token = mio::Token(1);
 const TOKEN_START: usize = 2;
@@ -179,6 +178,10 @@ impl Core {
     /// Creates a new event loop, returning any error that happened during the
     /// creation.
     pub fn new() -> io::Result<Core> {
+        Core::new_id(NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed) + 1)
+    }
+
+    fn new_id(id: usize) -> io::Result<Core> {
         let io = try!(mio::Poll::new());
         let future_pair = mio::Registration::new2();
         try!(io.register(&future_pair.0,
@@ -193,84 +196,46 @@ impl Core {
                          mio::PollOpt::level()));
         channel_pair.1.set_readiness(mio::Ready::readable()).unwrap();
 
-        Ok(Core {
-            inner: Arc::new(Inner {
-                id: NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed),
-                tx: tx,
-                rx: CoreCell::new(executor::spawn(rx)),
-                io: io,
-                io_dispatch: AtomicSlab::new(),
-                timeouts: AtomicSlab::new(),
+        let inner = Arc::new(Inner {
+            id: id,
+            tx: tx,
+            rx: CoreCell::new(executor::spawn(rx)),
+            io: io,
+            io_dispatch: AtomicSlab::new(),
+            timeouts: AtomicSlab::new(),
 
-                future_readiness: future_pair.1,
-                _future_registration: future_pair.0,
-                rx_readiness: channel_pair.1,
-                _rx_registration: channel_pair.0,
+            future_readiness: future_pair.1,
+            _future_registration: future_pair.0,
+            rx_readiness: channel_pair.1,
+            _rx_registration: channel_pair.0,
 
-                inner: Mutex::new(SynchronizedInner {
-                    events: RefCell::new(mio::Events::with_capacity(1024)),
-                    timer_heap: RefCell::new(Heap::new()),
+            inner: Mutex::new(SynchronizedInner {
+                events: RefCell::new(mio::Events::with_capacity(1024)),
+                timer_heap: RefCell::new(Heap::new()),
 
-                    // This is the one instance of `CoreProof` we'll create for
-                    // this core, hence the `unsafe` block. This is basically
-                    // just upholding the contract of `CoreCell` and
-                    // `CoreProof`.
-                    proof_i_have_the_lock: RefCell::new(unsafe { CoreProof::new() }),
-                }),
+                // This is the one instance of `CoreProof` we'll create for
+                // this core, hence the `unsafe` block. This is basically
+                // just upholding the contract of `CoreCell` and
+                // `CoreProof`.
+                proof_i_have_the_lock: RefCell::new(unsafe { CoreProof::new() }),
             }),
+        });
+
+        Ok(Core {
+            handle: Handle {
+                repr: HandleRepr::Ptr {
+                    id: inner.id,
+                    inner: Arc::downgrade(&inner),
+                },
+            },
+            inner: inner,
         })
-    }
-
-    /// Acquire a reference to this thread's current core.
-    ///
-    /// This function may return different values when called over time, but the
-    /// core returned here is the core that all I/O objects and timeouts will be
-    /// associated with on construction.
-    ///
-    /// # Errors
-    ///
-    /// If this function falls back to creating the global `Core` it may return
-    /// an error, which is indicated through the return value.
-    pub fn current() -> io::Result<Core> {
-        DEFAULT.with(|default| {
-            match *default.borrow() {
-                Some(ref core) => Ok(Core { inner: core.inner.clone() }),
-                None => Core::global(),
-            }
-        })
-    }
-
-    /// Acquire a reference to the global default `Core`.
-    ///
-    /// This function will acquire a reference to the global `Core` which is
-    /// being executed on a helper thread in the application. The core returned
-    /// here is the same each time this function is called.
-    ///
-    /// # Errors
-    ///
-    /// If this function initializes the global `Core` it may return
-    /// an error, which is indicated through the return value.
-    pub fn global() -> io::Result<Core> {
-        global::default_core()
-    }
-
-    /// Flags this core as the "current core" for all future operations.
-    ///
-    /// Calling this function affects the return value of `Core::current`. The
-    /// most recent call to `push_current` in this thread is what will be
-    /// returned from `Core::current`. When the `PushCurrent` struct here falls
-    /// out of scope then the previous current core will be restored.
-    pub fn push_current<'a>(&'a self) -> PushCurrent<'a> {
-        PushCurrent::new(self)
     }
 
     /// Generates a remote handle to this event loop which can be used to spawn
     /// tasks from other threads into this event loop.
-    fn handle(&self) -> Handle {
-        Handle {
-            id: self.inner.id,
-            core: Arc::downgrade(&self.inner),
-        }
+    pub fn handle(&self) -> &Handle {
+        &self.handle
     }
 
     /// Runs a future until completion, driving the event loop while we're
@@ -291,20 +256,7 @@ impl Core {
     /// This method will **not** catch panics from polling the future `f`. If
     /// the future panics then it's the responsibility of the caller to catch
     /// that panic and handle it as appropriate.
-    ///
-    /// # Concurrent behavior
-    ///
-    /// Note that concurrent usage of the `run` and `turn` methods isn't really
-    /// supported right now and while possible it's not recommended to invoke
-    /// these methods concurrently. Both of them acquire exclusive locks,
-    /// meaning that if one thread is calling `run` then any other thread
-    /// calling `run` or `turn` will be blocked until the first thread returns.
-    /// This is unlikely to be the desired behavior, so it's recommended to
-    /// avoid concurrently calling these methods.
-    ///
-    /// We'd like to fix this property in the future though! Stay tuned for more
-    /// information about concurrently using a `Core`.
-    pub fn run<F>(&self, f: F) -> Result<F::Item, F::Error>
+    pub fn run<F>(&mut self, f: F) -> Result<F::Item, F::Error>
         where F: Future,
     {
         let mut task = executor::spawn(f);
@@ -332,20 +284,7 @@ impl Core {
     ///
     /// `loop { lp.turn(None) }` is equivalent to calling `run` with an
     /// empty future (one that never finishes).
-    ///
-    /// # Concurrent behavior
-    ///
-    /// Note that concurrent usage of the `run` and `turn` methods isn't really
-    /// supported right now and while possible it's not recommended to invoke
-    /// these methods concurrently. Both of them acquire exclusive locks,
-    /// meaning that if one thread is calling `run` then any other thread
-    /// calling `run` or `turn` will be blocked until the first thread returns.
-    /// This is unlikely to be the desired behavior, so it's recommended to
-    /// avoid concurrently calling these methods.
-    ///
-    /// We'd like to fix this property in the future though! Stay tuned for more
-    /// information about concurrently using a `Core`.
-    pub fn turn(&self, max_wait: Option<Duration>) {
+    pub fn turn(&mut self, max_wait: Option<Duration>) {
         let sync = CoreSync::new(self);
         sync.with_tls_vars(|| drop(sync.poll(max_wait)))
     }
@@ -637,6 +576,19 @@ impl<'a> CoreSync<'a> {
 }
 
 impl Handle {
+    /// Acquires a handle to the global reactor.
+    ///
+    /// The global reactor is run in a separate thread in this process and is
+    /// lazily initialized. The first invocation of this function will spin up
+    /// the reactor.
+    ///
+    /// The `Handle` returned can be used to register I/O objects with the
+    /// reactor and create timeouts.
+    pub fn global() -> &'static Handle {
+        static GLOBAL: Handle = Handle { repr: HandleRepr::Global };
+        &GLOBAL
+    }
+
     fn send(&self, msg: Message) {
         self.with_loop(|opt| {
             match opt {
@@ -647,7 +599,7 @@ impl Handle {
                     core.notify(msg);
                 }
                 None => {
-                    let err = match self.core.upgrade() {
+                    let err = match self.inner() {
                         Some(io) => io.tx.unbounded_send(msg).is_err(),
                         None => true,
                     };
@@ -666,7 +618,7 @@ impl Handle {
         if CURRENT.is_set() {
             CURRENT.with(|core| {
                 let core = unsafe { &**core };
-                let same = core.inner.id == self.id;
+                let same = core.inner.id == self.id().0;
                 if same {
                     f(Some(core))
                 } else {
@@ -680,7 +632,17 @@ impl Handle {
 
     /// Return the ID of the represented Core
     pub fn id(&self) -> CoreId {
-        CoreId(self.id)
+        match self.repr {
+            HandleRepr::Ptr { id, .. } => CoreId(id),
+            HandleRepr::Global => CoreId(0),
+        }
+    }
+
+    fn inner(&self) -> Option<Arc<Inner>> {
+        match self.repr {
+            HandleRepr::Ptr { ref inner, .. } => inner.upgrade(),
+            HandleRepr::Global => global::inner(),
+        }
     }
 }
 
@@ -720,28 +682,6 @@ impl Notify for Inner {
         };
         readiness.set_readiness(mio::Ready::readable())
             .expect("failed to set readiness");
-    }
-}
-
-impl<'a> PushCurrent<'a> {
-    fn new(core: &'a Core) -> PushCurrent<'a> {
-        DEFAULT.with(|default| {
-            let mut default = default.borrow_mut();
-            let prev = default.take();
-            *default = Some(Core { inner: core.inner.clone() });
-            PushCurrent {
-                prev: prev,
-                _cur: core,
-            }
-        })
-    }
-}
-
-impl<'a> Drop for PushCurrent<'a> {
-    fn drop(&mut self) {
-        DEFAULT.with(|default| {
-            *default.borrow_mut() = self.prev.take();
-        })
     }
 }
 

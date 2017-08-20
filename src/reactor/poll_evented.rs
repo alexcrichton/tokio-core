@@ -15,7 +15,7 @@ use mio::event::Evented;
 use mio::Ready;
 use tokio_io::{AsyncRead, AsyncWrite};
 
-use reactor::{Handle, Core};
+use reactor::Handle;
 use reactor::io_token::IoToken;
 
 /// A concrete implementation of a stream of readiness notifications for I/O
@@ -84,11 +84,10 @@ impl<E: Evented> PollEvented<E> {
     ///
     /// This method returns a future which will resolve to the readiness stream
     /// when it's ready.
-    pub fn new(io: E) -> io::Result<PollEvented<E>> {
-        let core = Core::current()?;
+    pub fn new(io: E, handle: &Handle) -> io::Result<PollEvented<E>> {
         Ok(PollEvented {
-            token: try!(IoToken::new(&io, &core)),
-            handle: core.handle(),
+            token: try!(IoToken::new(&io, handle)),
+            handle: handle.clone(),
             readiness: AtomicUsize::new(0),
             io: io,
         })
@@ -107,7 +106,7 @@ impl<E: Evented> PollEvented<E> {
     /// method is called, and will likely return an error if this `PollEvented`
     /// was created on a separate event loop from the `handle` specified.
     pub fn deregister(self) -> io::Result<()> {
-        let io = match self.handle.core.upgrade() {
+        let io = match self.handle.inner() {
             Some(inner) => inner,
             None => return Ok(()),
         };
@@ -116,23 +115,6 @@ impl<E: Evented> PollEvented<E> {
 }
 
 impl<E> PollEvented<E> {
-    /// TODO: dox
-    pub fn register_other<U>(&self, io: U) -> io::Result<PollEvented<U>>
-        where U: Evented,
-    {
-        let inner = match self.handle.core.upgrade() {
-            Some(inner) => inner,
-            None => return Err(io::Error::new(io::ErrorKind::Other,
-                                              "core has gone away")),
-        };
-        Ok(PollEvented {
-            token: try!(IoToken::new(&io, &Core { inner })),
-            handle: self.handle.clone(),
-            readiness: AtomicUsize::new(0),
-            io: io,
-        })
-    }
-
     /// Tests to see if this source is ready to be read from or not.
     ///
     /// If this stream is not ready for a read then `NotReady` will be returned
@@ -279,6 +261,15 @@ impl<E> PollEvented<E> {
     /// stream is wrapping.
     pub fn get_mut(&mut self) -> &mut E {
         &mut self.io
+    }
+
+    /// Returns the handle that this instance is associated with.
+    ///
+    /// This handle is a connection to the event loop that this handle's I/O
+    /// events are routed from. This can be used to register more I/O objects or
+    /// create timeouts.
+    pub fn handle(&self) -> &Handle {
+        &self.handle
     }
 }
 

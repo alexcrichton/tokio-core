@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use futures::task;
 
-use reactor::{Message, Core, Handle};
+use reactor::{Message, Handle};
 
 /// A token that identifies an active timeout.
 pub struct TimeoutToken {
@@ -12,10 +12,12 @@ pub struct TimeoutToken {
 impl TimeoutToken {
     /// Adds a new timeout to get fired at the specified instant, notifying the
     /// specified task.
-    pub fn new(at: Instant, core: &Core) -> TimeoutToken {
-        let token = core.inner.add_timeout();
-        core.handle().send(Message::ResetTimeout(token, at));
-        TimeoutToken { token: token }
+    pub fn new(at: Instant, handle: &Handle) -> Option<TimeoutToken> {
+        handle.inner().map(|inner| {
+            let token = inner.add_timeout();
+            handle.send(Message::ResetTimeout(token, at));
+            TimeoutToken { token: token }
+        })
     }
 
     /// Updates a previously added timeout to notify a new task instead.
@@ -24,7 +26,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub(super) fn update_timeout(&self, handle: &Handle) {
+    pub fn update_timeout(&self, handle: &Handle) {
         handle.send(Message::UpdateTimeout(self.token, task::current()))
     }
 
@@ -34,7 +36,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub(super) fn reset_timeout(&self, at: Instant, handle: &Handle) {
+    pub fn reset_timeout(&self, at: Instant, handle: &Handle) {
         handle.send(Message::ResetTimeout(self.token, at));
     }
 
@@ -44,7 +46,7 @@ impl TimeoutToken {
     ///
     /// This method will panic if the timeout specified was not created by this
     /// loop handle's `add_timeout` method.
-    pub(super) fn cancel_timeout(&self, handle: &Handle) {
+    pub fn cancel_timeout(&self, handle: &Handle) {
         debug!("cancel timeout {}", self.token);
         handle.send(Message::CancelTimeout(self.token))
     }

@@ -1,4 +1,3 @@
-use std::io;
 use std::sync::Arc;
 use std::thread;
 
@@ -13,12 +12,8 @@ struct HelperThread {
 
 statik!(static DEFAULT: HelperThread = HelperThread::new());
 
-pub fn default_core() -> io::Result<Core> {
-    match DEFAULT.with(|h| h.core.clone()) {
-        Some(Some(inner)) => Ok(Core { inner }),
-        Some(None) => Err(io::Error::new(io::ErrorKind::Other, "global core failed to be created")),
-        None => Err(io::Error::new(io::ErrorKind::Other, "global core has been shut down")),
-    }
+pub(super) fn inner() -> Option<Arc<Inner>> {
+    DEFAULT.with(|h| h.core.clone()).and_then(|x| x)
 }
 
 #[allow(dead_code)]
@@ -28,7 +23,7 @@ pub fn shutdown_global() {
 
 impl HelperThread {
     fn new() -> HelperThread {
-        let core = match Core::new() {
+        let mut core = match Core::new_id(0) {
             Ok(core) => core,
             Err(_) => return HelperThread {
                 thread: None,

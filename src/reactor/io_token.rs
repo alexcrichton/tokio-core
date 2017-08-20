@@ -5,7 +5,7 @@ use std::io;
 use futures::task;
 use mio::event::Evented;
 
-use reactor::{Core, Message, Handle, Direction};
+use reactor::{Message, Handle, Direction};
 
 /// A token that identifies an active timeout.
 pub struct IoToken {
@@ -31,8 +31,13 @@ impl IoToken {
     /// The returned future will panic if the event loop this handle is
     /// associated with has gone away, or if there is an error communicating
     /// with the event loop.
-    pub fn new(source: &Evented, core: &Core) -> io::Result<IoToken> {
-        let (ready, token) = try!(core.inner.add_source(source));
+    pub fn new(source: &Evented, handle: &Handle) -> io::Result<IoToken> {
+        let inner = match handle.inner() {
+            Some(inner) => inner,
+            None => return Err(io::Error::new(io::ErrorKind::Other,
+                                              "core has gone away")),
+        };
+        let (ready, token) = try!(inner.add_source(source));
         Ok(IoToken { token: token, readiness: ready })
     }
 
@@ -77,7 +82,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub(super) fn schedule_read(&self, handle: &Handle) {
+    pub fn schedule_read(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Read));
     }
 
@@ -104,7 +109,7 @@ impl IoToken {
     ///
     /// This function will also panic if there is not a currently running future
     /// task.
-    pub(super) fn schedule_write(&self, handle: &Handle) {
+    pub fn schedule_write(&self, handle: &Handle) {
         handle.send(Message::Schedule(self.token, task::current(), Direction::Write));
     }
 
@@ -130,7 +135,7 @@ impl IoToken {
     /// This function will panic if the event loop this handle is associated
     /// with has gone away, or if there is an error communicating with the event
     /// loop.
-    pub(super) fn drop_source(&self, handle: &Handle) {
+    pub fn drop_source(&self, handle: &Handle) {
         handle.send(Message::DropSource(self.token));
     }
 }

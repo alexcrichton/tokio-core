@@ -9,6 +9,7 @@ use std::thread;
 use futures::Future;
 use futures::stream::Stream;
 use tokio_core::net::{TcpListener, TcpStream};
+use tokio_core::reactor::Handle;
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -26,7 +27,7 @@ fn connect() {
         t!(srv.accept()).0
     });
 
-    let stream = TcpStream::connect(&addr);
+    let stream = TcpStream::connect(&addr, Handle::global());
     let mine = t!(stream.wait());
     let theirs = t.join().unwrap();
 
@@ -37,7 +38,7 @@ fn connect() {
 #[test]
 fn accept() {
     drop(env_logger::init());
-    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse())));
+    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse()), Handle::global()));
     let addr = t!(srv.local_addr());
 
     let (tx, rx) = channel();
@@ -61,7 +62,7 @@ fn accept() {
 #[test]
 fn accept2() {
     drop(env_logger::init());
-    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse())));
+    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse()), Handle::global()));
     let addr = t!(srv.local_addr());
 
     let t = thread::spawn(move || {
