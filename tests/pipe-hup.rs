@@ -13,11 +13,10 @@ use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::thread;
 use std::time::Duration;
 
-use futures::Future;
-use mio::event::Evented;
 use mio::unix::{UnixReady, EventedFd};
 use mio::{PollOpt, Ready, Token};
-use tokio_core::reactor::PollEvented;
+use mio::event::Evented;
+use tokio_core::reactor::{Core, PollEvented};
 use tokio_io::io::read_to_end;
 
 macro_rules! t {
@@ -65,6 +64,7 @@ impl Evented for MyFile {
 fn hup() {
     drop(env_logger::init());
 
+    let mut l = t!(Core::new());
     unsafe {
         let mut pipes = [0; 2];
         assert!(libc::pipe(pipes.as_mut_ptr()) != -1,
@@ -77,10 +77,10 @@ fn hup() {
             thread::sleep(Duration::from_millis(100));
         });
 
-        let source = PollEvented::new(MyFile::new(read)).unwrap();
+        let source = PollEvented::new(MyFile::new(read), &l.handle()).unwrap();
 
         let reader = read_to_end(source, Vec::new());
-        let (_, content) = t!(reader.wait());
+        let (_, content) = t!(l.run(reader));
         assert_eq!(&b"Hello!\nGood bye!\n"[..], &content[..]);
         t.join().unwrap();
     }

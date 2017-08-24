@@ -11,6 +11,7 @@ use futures::Future;
 use futures::stream::Stream;
 use tokio_io::io::copy;
 use tokio_core::net::TcpListener;
+use tokio_core::reactor::Core;
 
 macro_rules! t {
     ($e:expr) => (match $e {
@@ -24,7 +25,8 @@ fn echo_server() {
     const N: usize = 1024;
     drop(env_logger::init());
 
-    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse())));
+    let mut l = t!(Core::new());
+    let srv = t!(TcpListener::bind(&t!("127.0.0.1:0".parse()), &l.handle()));
     let addr = t!(srv.local_addr());
 
     let msg = "foo bar baz";
@@ -54,7 +56,7 @@ fn echo_server() {
         copy(a, b)
     });
 
-    let (amt, _, _) = t!(copied.wait());
+    let (amt, _, _) = t!(l.run(copied));
     let (expected, t2) = t.join().unwrap();
     let actual = t2.join().unwrap();
 
