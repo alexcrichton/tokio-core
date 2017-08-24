@@ -7,6 +7,7 @@ use std::time::Duration;
 use bytes::{Buf, BufMut};
 use futures::stream::Stream;
 use futures::{Future, Poll, Async};
+use iovec::IoVec;
 use mio;
 use tokio_io::{AsyncRead, AsyncWrite};
 

@@ -46,16 +46,17 @@
 //! extern crate tokio_core;
 //! extern crate tokio_io;
 //!
-//! use futures::{Future, Stream};
 //! use futures::unsync::CurrentThread;
+//! use futures::{Future, Stream};
+//! use tokio_core::net::TcpListener;
+//! use tokio_core::reactor::Handle;
 //! use tokio_io::AsyncRead;
 //! use tokio_io::io::copy;
-//! use tokio_core::net::TcpListener;
 //!
 //! fn main() {
 //!     // Bind the server's socket
 //!     let addr = "127.0.0.1:12345".parse().unwrap();
-//!     let listener = TcpListener::bind(&addr).unwrap();
+//!     let listener = TcpListener::bind(&addr, Handle::global()).unwrap();
 //!
 //!     // Pull out a stream of sockets for incoming connections
 //!     let server = listener.incoming().for_each(|(sock, _)| {

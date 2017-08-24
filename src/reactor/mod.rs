@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
 use futures::executor::{self, Spawn, Notify};
-use futures::future::{Executor, ExecuteError};
+use futures::future::{self, Executor, ExecuteError, IntoFuture};
 use futures::sync::mpsc;
 use futures::task::Task;
 use futures::unsync::CurrentThread;
@@ -139,6 +139,7 @@ pub struct Remote {
 /// Handles can be cloned, and when cloned they will still refer to the
 /// same underlying event loop.
 #[derive(Clone)]
+#[allow(deprecated)]
 pub struct Handle {
     remote: Remote,
 }
@@ -181,6 +182,7 @@ enum Message {
     UpdateTimeout(usize, Task),
     ResetTimeout(usize, Instant),
     CancelTimeout(usize),
+    DeprecatedSpawnFuture(Box<DeprecatedSpawn>),
 }
 
 const TOKEN_MESSAGES: mio::Token = mio::Token(0);
@@ -194,6 +196,7 @@ impl Core {
         Core::new_id(NEXT_LOOP_ID.fetch_add(1, Ordering::Relaxed) + 1)
     }
 
+    #[allow(deprecated)]
     fn new_id(id: usize) -> io::Result<Core> {
         let io = try!(mio::Poll::new());
         let future_pair = mio::Registration::new2();
@@ -236,9 +239,11 @@ impl Core {
 
         Ok(Core {
             handle: Handle {
-                repr: HandleRepr::Ptr {
-                    id: inner.id,
-                    inner: Arc::downgrade(&inner),
+                remote: Remote {
+                    repr: HandleRepr::Ptr {
+                        id: inner.id,
+                        inner: Arc::downgrade(&inner),
+                    },
                 },
             },
             inner: inner,
@@ -253,8 +258,9 @@ impl Core {
 
     #[deprecated(note = "use the `Handle` type and `handle` function now")]
     #[doc(hidden)]
+    #[allow(deprecated)]
     pub fn remote(&self) -> Remote {
-        Remote { repr: self.handle.repr.clone() }
+        self.handle.remote.clone()
     }
 
     /// Runs a future until completion, driving the event loop while we're
@@ -490,6 +496,7 @@ impl<'a> CoreSync<'a> {
             Message::UpdateTimeout(t, handle) => self.update_timeout(t, handle),
             Message::ResetTimeout(t, at) => self.reset_timeout(t, at),
             Message::CancelTimeout(t) => self.cancel_timeout(t),
+            Message::DeprecatedSpawnFuture(t) => t.spawn(),
         }
     }
 
@@ -604,6 +611,17 @@ impl fmt::Debug for Core {
     }
 }
 
+trait DeprecatedSpawn: Send + 'static {
+    fn spawn(self: Box<Self>);
+}
+
+impl<F: FnOnce() + Send + 'static> DeprecatedSpawn for F {
+    fn spawn(self: Box<Self>) {
+        (*self)()
+    }
+}
+
+#[allow(deprecated)]
 impl Remote {
     #[doc(hidden)]
     #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
@@ -612,8 +630,10 @@ impl Remote {
               R: IntoFuture<Item=(), Error=()>,
               R::Future: 'static,
     {
-        drop(f);
-        panic!()
+        let handle = self.handle().unwrap();
+        self.repr.send(Message::DeprecatedSpawnFuture(Box::new(move || {
+            CurrentThread.spawn(f(&handle).into_future());
+        })));
     }
 
     #[doc(hidden)]
@@ -625,10 +645,11 @@ impl Remote {
     #[doc(hidden)]
     #[deprecated(note = "use the `Handle` type everywhere instead")]
     pub fn handle(&self) -> Option<Handle> {
-        Some(Handle { repr: self.repr.clone() })
+        Some(Handle { remote: self.clone() })
     }
 }
 
+#[allow(deprecated)]
 #[doc(hidden)]
 #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
 impl<F> Executor<F> for Remote
@@ -640,6 +661,7 @@ impl<F> Executor<F> for Remote
     }
 }
 
+#[allow(deprecated)]
 impl fmt::Debug for Remote {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Remote")
@@ -657,12 +679,16 @@ impl Handle {
     ///
     /// The `Handle` returned can be used to register I/O objects with the
     /// reactor and create timeouts.
+    #[allow(deprecated)]
     pub fn global() -> &'static Handle {
-        static GLOBAL: Handle = Handle { repr: HandleRepr::Global };
+        static GLOBAL: Handle = Handle {
+            remote: Remote { repr: HandleRepr::Global },
+        };
         &GLOBAL
     }
     #[doc(hidden)]
     #[deprecated(note = "use the `Handle` type everywhere instead")]
+    #[allow(deprecated)]
     pub fn remote(&self) -> &Remote {
         &self.remote
     }
@@ -677,6 +703,7 @@ impl Handle {
 
     #[doc(hidden)]
     #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+    #[allow(deprecated)]
     pub fn spawn_fn<F, R>(&self, f: F)
         where F: FnOnce() -> R + 'static,
               R: IntoFuture<Item=(), Error=()> + 'static,
@@ -685,8 +712,19 @@ impl Handle {
     }
 
     /// Return the ID of the represented Core
+    #[allow(deprecated)]
     pub fn id(&self) -> CoreId {
         self.remote.id()
+    }
+
+    #[allow(deprecated)]
+    fn inner(&self) -> Option<Arc<Inner>> {
+        self.remote.repr.inner()
+    }
+
+    #[allow(deprecated)]
+    fn send(&self, msg: Message) {
+        self.remote.repr.send(msg)
     }
 }
 
@@ -748,6 +786,7 @@ impl HandleRepr {
     }
 }
 
+#[allow(deprecated)]
 #[doc(hidden)]
 #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
 impl<F> Executor<F> for Handle

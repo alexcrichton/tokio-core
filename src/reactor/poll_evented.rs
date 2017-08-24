@@ -16,6 +16,8 @@ use mio::Ready;
 use tokio_io::{AsyncRead, AsyncWrite};
 
 use reactor::Handle;
+#[allow(deprecated)]
+use reactor::Remote;
 use reactor::io_token::IoToken;
 
 /// A concrete implementation of a stream of readiness notifications for I/O
@@ -253,8 +255,9 @@ impl<E> PollEvented<E> {
 
     #[deprecated(note = "use the `Handle` type and `handle` function now")]
     #[doc(hidden)]
+    #[allow(deprecated)]
     pub fn remote(&self) -> &Remote {
-        &self.handle
+        self.handle.remote()
     }
 
     /// Returns a shared reference to the underlying I/O object this readiness
