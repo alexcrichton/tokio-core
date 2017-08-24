@@ -6,6 +6,7 @@
 #![deprecated(since = "0.1.1", note = "use `futures::sync::mpsc` instead")]
 #![allow(deprecated)]
 #![cfg(feature = "with-deprecated")]
+#![doc(hidden)]
 
 use std::io;
 use std::sync::mpsc::TryRecvError;

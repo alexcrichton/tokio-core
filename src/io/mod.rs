@@ -11,6 +11,7 @@
 
 #![deprecated(note = "moved to the `tokio-io` crate")]
 #![allow(deprecated)]
+#![doc(hidden)]
 
 use std::io;
 
