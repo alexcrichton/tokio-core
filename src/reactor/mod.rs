@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicUsize, ATOMIC_USIZE_INIT, Ordering};
 use std::time::{Instant, Duration};
 
 use futures::executor::{self, Spawn, Notify};
+use futures::future::{Executor, ExecuteError};
 use futures::sync::mpsc;
 use futures::task::Task;
 use futures::unsync::CurrentThread;
@@ -127,6 +128,13 @@ pub struct CoreId(usize);
 /// same underlying event loop.
 #[derive(Clone)]
 pub struct Handle {
+    remote: Remote,
+}
+
+#[deprecated(note = "use the `Handle` type now instead")]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct Remote {
     repr: HandleRepr,
 }
 
@@ -234,8 +242,14 @@ impl Core {
 
     /// Generates a remote handle to this event loop which can be used to spawn
     /// tasks from other threads into this event loop.
-    pub fn handle(&self) -> &Handle {
-        &self.handle
+    pub fn handle(&self) -> Handle {
+        self.handle.clone()
+    }
+
+    #[deprecated(note = "use the `Handle` type and `handle` function now")]
+    #[doc(hidden)]
+    pub fn remote(&self) -> Remote {
+        Remote { repr: self.handle.repr.clone() }
     }
 
     /// Runs a future until completion, driving the event loop while we're
@@ -292,6 +306,16 @@ impl Core {
     /// Get the ID of this loop
     pub fn id(&self) -> CoreId {
         CoreId(self.inner.id)
+    }
+}
+
+#[doc(hidden)]
+#[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+impl<F> Executor<F> for Core
+    where F: Future<Item = (), Error = ()> + 'static,
+{
+    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
+        CurrentThread.execute(future)
     }
 }
 
@@ -575,6 +599,50 @@ impl<'a> CoreSync<'a> {
     }
 }
 
+impl Remote {
+    #[doc(hidden)]
+    #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+    pub fn spawn<F, R>(&self, f: F)
+        where F: FnOnce(&Handle) -> R + Send + 'static,
+              R: IntoFuture<Item=(), Error=()>,
+              R::Future: 'static,
+    {
+        drop(f);
+        panic!()
+    }
+
+    #[doc(hidden)]
+    #[deprecated(note = "use the `Handle` type everywhere instead")]
+    pub fn id(&self) -> CoreId {
+        self.repr.id()
+    }
+
+    #[doc(hidden)]
+    #[deprecated(note = "use the `Handle` type everywhere instead")]
+    pub fn handle(&self) -> Option<Handle> {
+        Some(Handle { repr: self.repr.clone() })
+    }
+}
+
+#[doc(hidden)]
+#[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+impl<F> Executor<F> for Remote
+    where F: Future<Item = (), Error = ()> + Send + 'static,
+{
+    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
+        self.spawn(|_| future);
+        Ok(())
+    }
+}
+
+impl fmt::Debug for Remote {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Remote")
+         .field("id", &self.id())
+         .finish()
+    }
+}
+
 impl Handle {
     /// Acquires a handle to the global reactor.
     ///
@@ -588,7 +656,36 @@ impl Handle {
         static GLOBAL: Handle = Handle { repr: HandleRepr::Global };
         &GLOBAL
     }
+    #[doc(hidden)]
+    #[deprecated(note = "use the `Handle` type everywhere instead")]
+    pub fn remote(&self) -> &Remote {
+        &self.remote
+    }
 
+    #[doc(hidden)]
+    #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+    pub fn spawn<F>(&self, f: F)
+        where F: Future<Item=(), Error=()> + 'static,
+    {
+        CurrentThread.spawn(f);
+    }
+
+    #[doc(hidden)]
+    #[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+    pub fn spawn_fn<F, R>(&self, f: F)
+        where F: FnOnce() -> R + 'static,
+              R: IntoFuture<Item=(), Error=()> + 'static,
+    {
+        self.spawn(future::lazy(f))
+    }
+
+    /// Return the ID of the represented Core
+    pub fn id(&self) -> CoreId {
+        self.remote.id()
+    }
+}
+
+impl HandleRepr {
     fn send(&self, msg: Message) {
         self.with_loop(|opt| {
             match opt {
@@ -631,18 +728,29 @@ impl Handle {
     }
 
     /// Return the ID of the represented Core
-    pub fn id(&self) -> CoreId {
-        match self.repr {
+    fn id(&self) -> CoreId {
+        match *self {
             HandleRepr::Ptr { id, .. } => CoreId(id),
             HandleRepr::Global => CoreId(0),
         }
     }
 
     fn inner(&self) -> Option<Arc<Inner>> {
-        match self.repr {
+        match *self {
             HandleRepr::Ptr { ref inner, .. } => inner.upgrade(),
             HandleRepr::Global => global::inner(),
         }
+    }
+}
+
+#[doc(hidden)]
+#[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+impl<F> Executor<F> for Handle
+    where F: Future<Item = (), Error = ()> + 'static,
+{
+    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
+        self.spawn(future);
+        Ok(())
     }
 }
 
