@@ -29,4 +29,4 @@ env_logger = { version = "0.4", default-features = false }
 libc = "0.2"
 
 [replace]
-'futures:0.1.14' = { path = "../futures" }
+'futures:0.1.15' = { path = "../futures" }
