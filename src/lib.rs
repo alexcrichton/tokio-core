@@ -89,6 +89,7 @@
 #![deny(missing_docs)]
 
 extern crate bytes;
+extern crate iovec;
 #[macro_use]
 extern crate futures;
 extern crate mio;
@@ -106,6 +107,7 @@ mod statik;
 
 mod atomic_slab;
 mod heap;
+pub mod io;
 pub mod net;
 pub mod reactor;
 
