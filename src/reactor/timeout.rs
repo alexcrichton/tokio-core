@@ -29,7 +29,7 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new(dur: Duration, handle: &Handle) -> Timeout {
+    pub fn new(dur: Duration, handle: &Handle) -> io::Result<Timeout> {
         Timeout::new_at(Instant::now() + dur, handle)
     }
 
@@ -38,13 +38,13 @@ impl Timeout {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, handle: &Handle) -> Timeout {
-        Timeout {
+    pub fn new_at(at: Instant, handle: &Handle) -> io::Result<Timeout> {
+        Ok(Timeout {
             core: TimeoutToken::new(at, handle).map(|token| {
                 (token, handle.clone())
             }),
             when: at,
-        }
+        })
     }
 
     /// Resets this timeout to an new timeout which will fire at the time

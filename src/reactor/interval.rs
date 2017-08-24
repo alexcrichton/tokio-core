@@ -34,7 +34,7 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// interval object. The interval object itself is then a stream which will
     /// be set to fire at the specified intervals
-    pub fn new(dur: Duration, handle: &Handle) -> Interval {
+    pub fn new(dur: Duration, handle: &Handle) -> io::Result<Interval> {
         Interval::new_at(Instant::now() + dur, dur, handle)
     }
 
@@ -44,14 +44,16 @@ impl Interval {
     /// This function will return a future that will resolve to the actual
     /// timeout object. The timeout object itself is then a future which will be
     /// set to fire at the specified point in the future.
-    pub fn new_at(at: Instant, dur: Duration, handle: &Handle) -> Interval {
-        Interval {
+    pub fn new_at(at: Instant, dur: Duration, handle: &Handle)
+        -> io::Result<Interval>
+    {
+        Ok(Interval {
             core: TimeoutToken::new(at, handle).map(|token| {
                 (token, handle.clone())
             }),
             next: at,
             interval: dur,
-        }
+        })
     }
 }
 
