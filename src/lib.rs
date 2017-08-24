@@ -108,6 +108,7 @@ mod statik;
 
 mod atomic_slab;
 mod heap;
+pub mod channel;
 pub mod io;
 pub mod net;
 pub mod reactor;
