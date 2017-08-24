@@ -493,6 +493,46 @@ impl AsyncWrite for TcpStream {
     }
 }
 
+#[allow(deprecated)]
+impl ::io::Io for TcpStream {
+    fn poll_read(&mut self) -> Async<()> {
+        <TcpStream>::poll_read(self)
+    }
+
+    fn poll_write(&mut self) -> Async<()> {
+        <TcpStream>::poll_write(self)
+    }
+
+    fn read_vec(&mut self, bufs: &mut [&mut IoVec]) -> io::Result<usize> {
+        if let Async::NotReady = <TcpStream>::poll_read(self) {
+            return Err(::would_block())
+        }
+        let r = self.io.get_ref().read_bufs(bufs);
+        if is_wouldblock(&r) {
+            self.io.need_read();
+        }
+        return r
+    }
+
+    fn write_vec(&mut self, bufs: &[&IoVec]) -> io::Result<usize> {
+        if let Async::NotReady = <TcpStream>::poll_write(self) {
+            return Err(::would_block())
+        }
+        let r = self.io.get_ref().write_bufs(bufs);
+        if is_wouldblock(&r) {
+            self.io.need_write();
+        }
+        return r
+    }
+}
+
+fn is_wouldblock<T>(r: &io::Result<T>) -> bool {
+    match *r {
+        Ok(_) => false,
+        Err(ref e) => e.kind() == io::ErrorKind::WouldBlock,
+    }
+}
+
 impl<'a> Read for &'a TcpStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         (&self.io).read(buf)
@@ -563,6 +603,17 @@ impl<'a> AsyncWrite for &'a TcpStream {
             }
             Err(e) => Err(e),
         }
+    }
+}
+
+#[allow(deprecated)]
+impl<'a> ::io::Io for &'a TcpStream {
+    fn poll_read(&mut self) -> Async<()> {
+        <TcpStream>::poll_read(self)
+    }
+
+    fn poll_write(&mut self) -> Async<()> {
+        <TcpStream>::poll_write(self)
     }
 }
 
