@@ -129,6 +129,7 @@ pub struct CoreId(usize);
 #[deprecated(note = "use the `Handle` type now instead")]
 #[doc(hidden)]
 #[derive(Clone)]
+#[allow(deprecated)]
 pub struct Remote {
     repr: HandleRepr,
 }
