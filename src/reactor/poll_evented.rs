@@ -105,8 +105,8 @@ impl<E: Evented> PollEvented<E> {
     /// This consumes `self` as it will no longer provide events after the
     /// method is called, and will likely return an error if this `PollEvented`
     /// was created on a separate event loop from the `handle` specified.
-    pub fn deregister(self) -> io::Result<()> {
-        let io = match self.handle.inner() {
+    pub fn deregister(self, handle: &Handle) -> io::Result<()> {
+        let io = match handle.inner() {
             Some(inner) => inner,
             None => return Ok(()),
         };
@@ -251,8 +251,8 @@ impl<E> PollEvented<E> {
         self.token.schedule_write(&self.handle)
     }
 
-    /// Returns a reference to the event loop handle that this readiness stream
-    /// is associated with.
+    #[deprecated(note = "use the `Handle` type and `handle` function now")]
+    #[doc(hidden)]
     pub fn remote(&self) -> &Remote {
         &self.handle
     }

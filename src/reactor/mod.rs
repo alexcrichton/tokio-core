@@ -126,16 +126,21 @@ pub struct CoreId(usize);
 ///
 /// Handles can be cloned, and when cloned they will still refer to the
 /// same underlying event loop.
-#[derive(Clone)]
-pub struct Handle {
-    remote: Remote,
-}
-
 #[deprecated(note = "use the `Handle` type now instead")]
 #[doc(hidden)]
 #[derive(Clone)]
 pub struct Remote {
     repr: HandleRepr,
+}
+
+/// Handle to an event loop, used to construct I/O objects, send messages, and
+/// otherwise interact indirectly with the event loop itself.
+///
+/// Handles can be cloned, and when cloned they will still refer to the
+/// same underlying event loop.
+#[derive(Clone)]
+pub struct Handle {
+    remote: Remote,
 }
 
 #[derive(Clone)]
@@ -306,24 +311,6 @@ impl Core {
     /// Get the ID of this loop
     pub fn id(&self) -> CoreId {
         CoreId(self.inner.id)
-    }
-}
-
-#[doc(hidden)]
-#[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
-impl<F> Executor<F> for Core
-    where F: Future<Item = (), Error = ()> + 'static,
-{
-    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
-        CurrentThread.execute(future)
-    }
-}
-
-impl fmt::Debug for Core {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("Core")
-         .field("id", &self.id())
-         .finish()
     }
 }
 
@@ -596,6 +583,24 @@ impl<'a> CoreSync<'a> {
 
     fn proof(&self) -> RefMut<CoreProof> {
         self.sync.proof_i_have_the_lock.borrow_mut()
+    }
+}
+
+#[doc(hidden)]
+#[deprecated(note = "deprecated in favor of spawning support in the futures crate")]
+impl<F> Executor<F> for Core
+    where F: Future<Item = (), Error = ()> + 'static,
+{
+    fn execute(&self, future: F) -> Result<(), ExecuteError<F>> {
+        CurrentThread.execute(future)
+    }
+}
+
+impl fmt::Debug for Core {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.debug_struct("Core")
+         .field("id", &self.id())
+         .finish()
     }
 }
 
