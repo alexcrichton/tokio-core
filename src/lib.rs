@@ -95,22 +95,16 @@
 extern crate bytes;
 #[macro_use]
 extern crate futures;
+extern crate futures_timer;
 extern crate iovec;
 extern crate mio;
-extern crate slab;
+extern crate tokio;
 extern crate tokio_io;
-
-#[macro_use]
-extern crate scoped_tls;
-
-#[macro_use]
-extern crate log;
 
 #[macro_use]
 #[doc(hidden)]
 pub mod io;
 
-mod heap;
 #[doc(hidden)]
 pub mod channel;
 pub mod net;

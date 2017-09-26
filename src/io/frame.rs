@@ -337,9 +337,7 @@ impl<T: Io, C: Codec> Stream for Framed<T, C> {
                         return Ok(Async::Ready(Some(frame)))
                     }
                 }
-                trace!("attempting to decode a frame");
                 if let Some(frame) = try!(self.codec.decode(&mut self.rd)) {
-                    trace!("frame decoded from buffer");
                     return Ok(Async::Ready(Some(frame)));
                 }
                 self.is_readable = false;
@@ -386,10 +384,8 @@ impl<T: Io, C: Codec> Sink for Framed<T, C> {
     }
 
     fn poll_complete(&mut self) -> Poll<(), io::Error> {
-        trace!("flushing framed transport");
 
         while !self.wr.is_empty() {
-            trace!("writing; remaining={}", self.wr.len());
             let n = try_nb!(self.upstream.write(&self.wr));
             if n == 0 {
                 return Err(io::Error::new(io::ErrorKind::WriteZero,
@@ -401,7 +397,6 @@ impl<T: Io, C: Codec> Sink for Framed<T, C> {
         // Try flushing the underlying IO
         try_nb!(self.upstream.flush());
 
-        trace!("framed transport flushed");
         return Ok(Async::Ready(()));
     }
 

@@ -70,9 +70,7 @@ impl<C: UdpCodec> Stream for UdpFramed<C> {
 
     fn poll(&mut self) -> Poll<Option<C::In>, io::Error> {
         let (n, addr) = try_nb!(self.socket.recv_from(&mut self.rd));
-        trace!("received {} bytes, decoding", n);
         let frame = try!(self.codec.decode(&addr, &self.rd[..n]));
-        trace!("frame decoded from buffer");
         Ok(Async::Ready(Some(frame)))
     }
 }
@@ -82,7 +80,6 @@ impl<C: UdpCodec> Sink for UdpFramed<C> {
     type SinkError = io::Error;
 
     fn start_send(&mut self, item: C::Out) -> StartSend<C::Out, io::Error> {
-        trace!("sending frame");
 
         if !self.flushed {
             match try!(self.poll_complete()) {
@@ -93,7 +90,6 @@ impl<C: UdpCodec> Sink for UdpFramed<C> {
 
         self.out_addr = self.codec.encode(item, &mut self.wr);
         self.flushed = false;
-        trace!("frame encoded; length={}", self.wr.len());
 
         Ok(AsyncSink::Ready)
     }
@@ -103,9 +99,7 @@ impl<C: UdpCodec> Sink for UdpFramed<C> {
             return Ok(Async::Ready(()))
         }
 
-        trace!("flushing frame; length={}", self.wr.len());
         let n = try_nb!(self.socket.send_to(&self.wr, &self.out_addr));
-        trace!("written {}", n);
 
         let wrote_all = n == self.wr.len();
         self.wr.clear();
